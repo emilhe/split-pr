@@ -13,16 +13,9 @@ A Claude Code plugin that splits large PRs into chains of small, reviewable PRs.
 
 ### As a Claude Code plugin
 
-First, add the marketplace (one-time):
-
 ```bash
-claude mcp add-marketplace emilhe/split-pr
-```
-
-Then install:
-
-```bash
-claude plugin install split-pr
+/plugin marketplace add emilhe/split-pr
+/plugin install split-pr@emilhe-split-pr
 ```
 
 ### CLI only
