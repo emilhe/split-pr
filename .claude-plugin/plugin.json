@@ -1,0 +1,14 @@
+{
+  "name": "split-pr",
+  "version": "0.1.0",
+  "description": "Split large PRs into chains of smaller, reviewable PRs using DAG-based semantic analysis",
+  "author": {
+    "name": "Emil Eriksen"
+  },
+  "repository": "https://github.com/emilhe/split-pr",
+  "license": "MIT",
+  "keywords": ["git", "pr", "code-review", "refactoring", "split"],
+  "commands": "./commands/",
+  "agents": "./agents/",
+  "hooks": "./hooks/hooks.json"
+}

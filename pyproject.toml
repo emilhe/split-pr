@@ -1,0 +1,28 @@
+[project]
+name = "split-pr"
+version = "0.1.0"
+description = "Split large PRs into reviewable chunks"
+requires-python = ">=3.11"
+dependencies = [
+    "unidiff>=0.7",
+    "networkx>=3.0",
+    "typer>=0.12",
+]
+
+[project.scripts]
+split-pr-tools = "split_pr.cli:app"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/split_pr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v split-pr-tools >/dev/null 2>&1 || uv tool install \"${CLAUDE_PLUGIN_ROOT}\" 2>/dev/null || echo 'split-pr: failed to install CLI — run: uv tool install split-pr'"
+          }
+        ]
+      }
+    ]
+  }
+}
