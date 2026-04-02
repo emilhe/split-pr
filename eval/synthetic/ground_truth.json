@@ -1,0 +1,151 @@
+{
+  "description": "Ground truth for the split-pr synthetic evaluation dataset. Each topic represents a logically cohesive change that should be grouped together in a single sub-PR.",
+  "topics": [
+    {
+      "id": "clean-feature",
+      "name": "New user preferences endpoint",
+      "description": "Add a UserPreferences model, a CRUD API at /preferences, and corresponding tests. Uses the cache layer for read-through caching.",
+      "files": [
+        "models/preferences.py",
+        "api/preferences.py",
+        "tests/test_preferences.py",
+        "api/__init__.py",
+        "models/__init__.py"
+      ],
+      "expected_size_lines": 250,
+      "commits": ["commit-2", "commit-3", "commit-6"],
+      "depends_on": ["shared-cache"]
+    },
+    {
+      "id": "cross-cutting-rename",
+      "name": "Rename build_log_prefix to log_context",
+      "description": "Consistent rename of a utility function across all call sites. This is one logical change even though it touches many files.",
+      "files": [
+        "utils/formatting.py",
+        "utils/__init__.py",
+        "database/queries.py",
+        "api/products.py",
+        "api/inventory.py"
+      ],
+      "expected_size_lines": 20,
+      "commits": ["commit-3"],
+      "depends_on": [],
+      "notes": "This is a cross-cutting refactor — all changes are mechanically related. Must NOT be split."
+    },
+    {
+      "id": "shared-cache",
+      "name": "TTL cache infrastructure",
+      "description": "Add a thread-safe in-memory cache with TTL support, then wire it into the database layer via cached repository wrappers.",
+      "files": [
+        "utils/cache.py",
+        "database/cached_queries.py",
+        "utils/__init__.py",
+        "database/__init__.py"
+      ],
+      "expected_size_lines": 200,
+      "commits": ["commit-1", "commit-8"],
+      "depends_on": [],
+      "notes": "Foundational infrastructure. Preferences and bug fix topics depend on this."
+    },
+    {
+      "id": "bug-fix-low-stock",
+      "name": "Fix off-by-one in low stock query threshold",
+      "description": "The get_low_stock_items query used < instead of <= for the threshold comparison, causing items exactly at the threshold to be missed.",
+      "files": [
+        "database/queries.py"
+      ],
+      "expected_size_lines": 2,
+      "commits": ["commit-1"],
+      "depends_on": [],
+      "notes": "Single-line fix in a file shared with two other topics. Must be split at hunk level."
+    },
+    {
+      "id": "new-warehouse-queries",
+      "name": "WarehouseRepository with zone utilization queries",
+      "description": "Add a new repository class for warehouse operations including zone utilization stats and availability search.",
+      "files": [
+        "database/queries.py",
+        "database/__init__.py"
+      ],
+      "expected_size_lines": 60,
+      "commits": ["commit-5", "commit-8"],
+      "depends_on": ["cross-cutting-rename"],
+      "notes": "Uses the renamed log_context function. Shares database/queries.py with the bug fix topic."
+    },
+    {
+      "id": "vendored-ratelimit",
+      "name": "Vendor rate limiting library",
+      "description": "Copy the ratelimit library (v2.1.0) into _vendor/ for use as API middleware.",
+      "files": [
+        "_vendor/__init__.py",
+        "_vendor/ratelimit/__init__.py",
+        "_vendor/ratelimit/core.py",
+        "_vendor/ratelimit/storage.py",
+        "_vendor/ratelimit/middleware.py"
+      ],
+      "expected_size_lines": 250,
+      "commits": ["commit-4"],
+      "depends_on": [],
+      "notes": "All files under _vendor/. Easy to group by path prefix."
+    },
+    {
+      "id": "reporting-package",
+      "name": "New reporting package with generators",
+      "description": "Add a reporting module with empty __init__.py files and a basic ReportGenerator class.",
+      "files": [
+        "reporting/__init__.py",
+        "reporting/exporters/__init__.py",
+        "reporting/generators.py"
+      ],
+      "expected_size_lines": 30,
+      "commits": ["commit-5"],
+      "depends_on": [],
+      "notes": "Tests empty __init__.py handling. Two of the three files are empty."
+    },
+    {
+      "id": "test-infrastructure",
+      "name": "Test fixtures, helpers, and integration tests",
+      "description": "Add shared test infrastructure: conftest.py with fixtures, test helper factories, and cross-module integration tests.",
+      "files": [
+        "tests/conftest.py",
+        "tests/test_helpers.py",
+        "tests/test_integration.py"
+      ],
+      "expected_size_lines": 250,
+      "commits": ["commit-2", "commit-5", "commit-7"],
+      "depends_on": [],
+      "notes": "Spread across 3 commits. Pure test infrastructure, not tied to a specific feature."
+    },
+    {
+      "id": "config-deps-update",
+      "name": "Project config and dependency updates",
+      "description": "Bump version to 1.3.0, add redis and pytest-cov dependencies, add coverage config, add .gitignore.",
+      "files": [
+        "pyproject.toml",
+        ".gitignore"
+      ],
+      "expected_size_lines": 30,
+      "commits": ["commit-4", "commit-6"],
+      "depends_on": [],
+      "notes": "Config/dependency changes that don't affect runtime behavior."
+    }
+  ],
+  "expected_dag_edges": [
+    ["shared-cache", "clean-feature"],
+    ["cross-cutting-rename", "new-warehouse-queries"]
+  ],
+  "metadata": {
+    "total_topics": 9,
+    "total_files_changed": 25,
+    "total_commits": 8,
+    "entangled_commits": 7,
+    "clean_commits": 1,
+    "shared_files": {
+      "database/queries.py": ["cross-cutting-rename", "bug-fix-low-stock", "new-warehouse-queries"],
+      "database/__init__.py": ["shared-cache", "new-warehouse-queries"],
+      "utils/__init__.py": ["shared-cache", "cross-cutting-rename"],
+      "api/__init__.py": ["clean-feature"],
+      "models/__init__.py": ["clean-feature"]
+    }
+  }
+}

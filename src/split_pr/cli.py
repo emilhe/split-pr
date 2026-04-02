@@ -14,6 +14,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -337,6 +338,124 @@ def verify(
     else:
         typer.echo("FAILED: Split does not reproduce the original diff. See issues above.")
         raise typer.Exit(1)
+
+
+@app.command()
+def score(
+    discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
+    ground_truth_file: Path = typer.Argument(..., help="Path to ground truth JSON"),
+    hunks_file: Path = typer.Argument(None, help="Path to hunks JSON (for file-path resolution)"),
+) -> None:
+    """Score a discovery result against ground truth. Outputs JSON."""
+    discovery = json.loads(discovery_file.read_text())
+    ground_truth = json.loads(ground_truth_file.read_text())
+    hunks_data = json.loads(hunks_file.read_text()) if hunks_file else None
+
+    gt_topics = ground_truth["topics"]
+    gt_edges = ground_truth.get("expected_dag_edges", [])
+
+    # Build hunk->file mapping
+    hunk_to_file: dict[str, str] = {}
+    if hunks_data:
+        for fi in hunks_data["files"]:
+            for h in fi["hunks"]:
+                hunk_to_file[h["id"]] = h["file_path"]
+
+    # Extract discovered topics as {id, files} from our native format
+    disc_topics: list[dict[str, Any]] = []
+    if "dag" in discovery and "assignments" in discovery:
+        topic_files: dict[str, set[str]] = {}
+        for hunk_id, topic_id in discovery["assignments"].items():
+            topic_files.setdefault(topic_id, set())
+            if hunk_id in hunk_to_file:
+                topic_files[topic_id].add(hunk_to_file[hunk_id])
+        for tid in discovery["dag"]["topics"]:
+            disc_topics.append({"id": tid, "files": sorted(topic_files.get(tid, set()))})
+    else:
+        typer.echo("ERROR: Unsupported discovery format", err=True)
+        raise typer.Exit(1)
+
+    # Topic matching: for each GT topic, find best-matching discovered topic
+    topic_scores = []
+    for gt in gt_topics:
+        gt_files = set(gt["files"])
+        best = {"id": None, "recall": 0.0, "precision": 0.0}
+        for disc in disc_topics:
+            disc_files = set(disc["files"])
+            overlap = gt_files & disc_files
+            if not overlap:
+                continue
+            recall = len(overlap) / len(gt_files)
+            precision = len(overlap) / len(disc_files)
+            if recall > best["recall"] or (recall == best["recall"] and precision > best["precision"]):
+                best = {"id": disc["id"], "recall": recall, "precision": precision}
+        f1 = 2 * best["recall"] * best["precision"] / max(best["recall"] + best["precision"], 1e-9)
+        topic_scores.append({
+            "gt_topic": gt["id"], "match": best["id"],
+            "recall": round(best["recall"], 3),
+            "precision": round(best["precision"], 3),
+            "f1": round(f1, 3),
+        })
+
+    # DAG similarity — translate discovered edges via topic matching
+    # Build mapping: discovered topic ID → ground truth topic ID
+    disc_to_gt: dict[str, str] = {}
+    for ts in topic_scores:
+        if ts["match"]:
+            disc_to_gt[ts["match"]] = ts["gt_topic"]
+
+    gt_edge_set = {(e[0], e[1]) for e in gt_edges}
+    disc_edges_raw: set[tuple[str, str]] = set()
+    if "dag" in discovery:
+        for e in discovery["dag"].get("edges", []):
+            disc_edges_raw.add((e["from"], e["to"]))
+
+    # Translate discovered edges to ground truth namespace
+    disc_edges: set[tuple[str, str]] = set()
+    for src, dst in disc_edges_raw:
+        mapped_src = disc_to_gt.get(src, src)
+        mapped_dst = disc_to_gt.get(dst, dst)
+        disc_edges.add((mapped_src, mapped_dst))
+
+    tp = gt_edge_set & disc_edges
+    dag_precision = len(tp) / max(len(disc_edges), 1)
+    dag_recall = len(tp) / max(len(gt_edge_set), 1)
+    dag_f1 = 2 * dag_precision * dag_recall / max(dag_precision + dag_recall, 1e-9)
+
+    # Over/under splits
+    over_splits = sum(
+        1 for gt in gt_topics
+        if sum(1 for d in disc_topics if set(gt["files"]) & set(d["files"])) > 1
+    )
+    under_splits = sum(
+        1 for d in disc_topics
+        if sum(1 for gt in gt_topics if set(gt["files"]) & set(d["files"])) > 1
+    )
+
+    # Aggregates
+    avg_f1 = round(sum(t["f1"] for t in topic_scores) / max(len(topic_scores), 1), 3)
+    avg_recall = round(sum(t["recall"] for t in topic_scores) / max(len(topic_scores), 1), 3)
+    avg_precision = round(sum(t["precision"] for t in topic_scores) / max(len(topic_scores), 1), 3)
+
+    split_penalty = (over_splits + under_splits) / max(len(gt_topics), 1)
+    split_score = round(max(0.0, 1.0 - split_penalty), 3)
+    composite = round(0.50 * avg_f1 + 0.25 * dag_f1 + 0.25 * split_score, 3)
+
+    result = {
+        "topic_f1": avg_f1,
+        "topic_recall": avg_recall,
+        "topic_precision": avg_precision,
+        "dag_f1": round(dag_f1, 3),
+        "split_score": split_score,
+        "composite": composite,
+        "topic_count_gt": len(gt_topics),
+        "topic_count_discovered": len(disc_topics),
+        "over_splits": over_splits,
+        "under_splits": under_splits,
+        "details": topic_scores,
+    }
+
+    typer.echo(json.dumps(result, indent=2))
 
 
 @app.command()

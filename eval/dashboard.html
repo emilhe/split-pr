@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>split-pr eval dashboard</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --green: #3fb950; --red: #f85149; --blue: #58a6ff; --yellow: #d29922; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 2rem; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+  .subtitle { color: var(--muted); margin-bottom: 2rem; font-size: 0.9rem; }
+  .load-hint { color: var(--muted); text-align: center; padding: 4rem 0; }
+  .load-hint code { background: var(--card); padding: 0.2rem 0.5rem; border-radius: 4px; }
+
+  .run-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; margin-bottom: 1rem; }
+  .run-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.8rem; }
+  .run-header .sha { font-family: monospace; color: var(--blue); font-size: 0.85rem; }
+  .run-header .timestamp { color: var(--muted); font-size: 0.85rem; }
+  .run-header .benchmark { font-weight: 600; font-size: 1rem; }
+
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.8rem; }
+  .metric { text-align: center; }
+  .metric .value { font-size: 1.8rem; font-weight: 700; font-family: monospace; }
+  .metric .label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .metric .delta { font-size: 0.75rem; margin-top: 0.2rem; }
+  .delta.up { color: var(--green); }
+  .delta.down { color: var(--red); }
+  .delta.same { color: var(--muted); }
+
+  .details { margin-top: 0.8rem; border-top: 1px solid var(--border); padding-top: 0.8rem; }
+  .details summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
+  .detail-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.8rem; }
+  .detail-table th, .detail-table td { padding: 0.3rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border); }
+  .detail-table th { color: var(--muted); font-weight: 500; }
+
+  .color-good { color: var(--green); }
+  .color-ok { color: var(--yellow); }
+  .color-bad { color: var(--red); }
+
+  .chart { margin-top: 2rem; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; }
+  .chart h2 { font-size: 1rem; margin-bottom: 1rem; }
+  .sparkline { display: flex; align-items: end; gap: 2px; height: 60px; }
+  .spark-bar { flex: 1; background: var(--blue); border-radius: 2px 2px 0 0; min-width: 8px; max-width: 40px; transition: opacity 0.2s; cursor: pointer; position: relative; }
+  .spark-bar:hover { opacity: 0.8; }
+  .spark-bar .tooltip { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: var(--card); border: 1px solid var(--border); padding: 0.3rem 0.5rem; border-radius: 4px; white-space: nowrap; font-size: 0.75rem; z-index: 10; }
+  .spark-bar:hover .tooltip { display: block; }
+</style>
+</head>
+<body>
+
+<h1>split-pr eval dashboard</h1>
+<p class="subtitle">Comparing discovery quality across runs</p>
+
+<div id="app">
+  <div class="load-hint">
+    <p>Drop <code>scores.jsonl</code> here or click to load</p>
+    <input type="file" id="file-input" accept=".jsonl,.json" style="margin-top: 1rem;">
+  </div>
+</div>
+
+<script>
+const app = document.getElementById('app');
+
+function colorClass(val) {
+  if (val >= 0.8) return 'color-good';
+  if (val >= 0.5) return 'color-ok';
+  return 'color-bad';
+}
+
+function pct(val) { return (val * 100).toFixed(1) + '%'; }
+
+function deltaStr(curr, prev) {
+  if (prev === undefined || prev === null) return '';
+  const diff = curr - prev;
+  if (Math.abs(diff) < 0.001) return '<span class="delta same">=</span>';
+  const arrow = diff > 0 ? '&#9650;' : '&#9660;';
+  const cls = diff > 0 ? 'up' : 'down';
+  return `<span class="delta ${cls}">${arrow} ${(diff * 100).toFixed(1)}pp</span>`;
+}
+
+function renderRuns(lines) {
+  // Group by benchmark
+  const byBenchmark = {};
+  for (const line of lines) {
+    const b = line.benchmark || 'unknown';
+    if (!byBenchmark[b]) byBenchmark[b] = [];
+    byBenchmark[b].push(line);
+  }
+
+  let html = '';
+
+  // Composite chart per benchmark
+  for (const [benchmark, runs] of Object.entries(byBenchmark)) {
+    // Chart
+    const composites = runs.map(r => r.scores?.composite || 0);
+    const maxC = Math.max(...composites, 0.01);
+    html += `<div class="chart"><h2>${benchmark} — composite score over time</h2><div class="sparkline">`;
+    for (let i = 0; i < runs.length; i++) {
+      const c = composites[i];
+      const h = Math.max(4, (c / maxC) * 60);
+      const t = runs[i].timestamp?.slice(0, 16) || '';
+      const sha = runs[i].git_sha || '';
+      html += `<div class="spark-bar" style="height:${h}px"><span class="tooltip">${t} ${sha} — ${pct(c)}</span></div>`;
+    }
+    html += '</div></div>';
+
+    // Run cards (newest first)
+    for (let i = runs.length - 1; i >= 0; i--) {
+      const run = runs[i];
+      const prev = i > 0 ? runs[i - 1].scores : null;
+      const s = run.scores || {};
+
+      html += `<div class="run-card">
+        <div class="run-header">
+          <span class="benchmark">${benchmark}</span>
+          <span class="sha">${run.git_sha || '?'}</span>
+          <span class="timestamp">${run.timestamp || ''}</span>
+        </div>
+        <div class="metrics">
+          <div class="metric">
+            <div class="value ${colorClass(s.composite || 0)}">${pct(s.composite || 0)}</div>
+            <div class="label">Composite</div>
+            ${deltaStr(s.composite, prev?.composite)}
+          </div>
+          <div class="metric">
+            <div class="value ${colorClass(s.topic_f1 || 0)}">${pct(s.topic_f1 || 0)}</div>
+            <div class="label">Topic F1</div>
+            ${deltaStr(s.topic_f1, prev?.topic_f1)}
+          </div>
+          <div class="metric">
+            <div class="value ${colorClass(s.dag_f1 || 0)}">${pct(s.dag_f1 || 0)}</div>
+            <div class="label">DAG F1</div>
+            ${deltaStr(s.dag_f1, prev?.dag_f1)}
+          </div>
+          <div class="metric">
+            <div class="value ${colorClass(s.split_score || 0)}">${pct(s.split_score || 0)}</div>
+            <div class="label">Split Quality</div>
+            ${deltaStr(s.split_score, prev?.split_score)}
+          </div>
+          <div class="metric">
+            <div class="value" style="font-size:1.2rem">${s.topic_count_discovered || '?'} / ${s.topic_count_gt || '?'}</div>
+            <div class="label">Topics (found / expected)</div>
+          </div>
+        </div>`;
+
+      // Per-topic details
+      if (s.details && s.details.length) {
+        html += `<div class="details"><details><summary>Per-topic scores</summary>
+          <table class="detail-table">
+            <thead><tr><th>Ground Truth</th><th>Match</th><th>Recall</th><th>Precision</th><th>F1</th></tr></thead>
+            <tbody>`;
+        for (const d of s.details) {
+          html += `<tr>
+            <td>${d.gt_topic}</td>
+            <td>${d.match || '(none)'}</td>
+            <td class="${colorClass(d.recall)}">${pct(d.recall)}</td>
+            <td class="${colorClass(d.precision)}">${pct(d.precision)}</td>
+            <td class="${colorClass(d.f1)}">${pct(d.f1)}</td>
+          </tr>`;
+        }
+        html += '</tbody></table></details></div>';
+      }
+
+      html += '</div>';
+    }
+  }
+
+  app.innerHTML = html;
+}
+
+// File loading
+document.getElementById('file-input').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    const text = ev.target.result;
+    const lines = text.trim().split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+    renderRuns(lines);
+  };
+  reader.readAsText(file);
+});
+
+// Auto-load if scores.jsonl is in the same directory (won't work for file:// but works via local server)
+fetch('scores.jsonl')
+  .then(r => r.ok ? r.text() : Promise.reject())
+  .then(text => {
+    const lines = text.trim().split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+    renderRuns(lines);
+  })
+  .catch(() => {}); // silently fail, user can still use file picker
+</script>
+
+</body>
+</html>
