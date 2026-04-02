@@ -1,13 +1,13 @@
 # split-pr
 
-**Stop letting monster PRs die in review purgatory.**
-
-`split-pr` is a Claude Code plugin that takes your massive, tangled pull request and splits it into a chain of small, reviewable PRs — automatically. It understands your code semantically, builds a dependency graph, and creates the PRs in the right order.
-
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Tests](https://img.shields.io/badge/tests-93%20passing-brightgreen.svg)]()
 [![Claude Code Plugin](https://img.shields.io/badge/Claude%20Code-plugin-blueviolet.svg)]()
+
+**Stop letting monster PRs die in review purgatory.**
+
+`split-pr` is a Claude Code plugin that takes your massive, tangled pull request and splits it into a chain of small, reviewable PRs — automatically. It understands your code semantically, builds a dependency graph, and creates the PRs in the right order.
 
 ---
 
@@ -32,19 +32,6 @@ That's it. `split-pr` will:
 5. **Create PRs** with proper base branches, descriptions, and merge order
 6. **Create a tracking issue** linking everything together
 
-```
-PR (22,000 lines)
-├── [fcst_mig 1/10] Config and dependencies          340 lines  → main
-├── [fcst_mig 2/10] Database core                     529 lines  → #1
-├── [fcst_mig 3/10] Caching infrastructure            736 lines  → #2
-├── [fcst_mig 4/10] Auth extensions                 1,098 lines  → #2 (parallel with #3)
-├── [fcst_mig 5/10] Legacy shims (vendored)        14,479 lines  → #3
-├── [fcst_mig 6/10] Adapter bridge                  1,385 lines  → #5
-├── [fcst_mig 7/10] Forecast endpoints                747 lines  → #6
-├── [fcst_mig 8/10] Manage cubes                      459 lines  → #6 (parallel with #7)
-├── [fcst_mig 9/10] App wiring                         56 lines  → #7 + #8
-└── [fcst_mig 10/10] Docs and scripts                 549 lines  → independent
-```
 
 ## How it works
 
