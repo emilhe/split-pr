@@ -11,17 +11,9 @@ A Claude Code plugin that splits large PRs into chains of small, reviewable PRs.
 
 ## Install
 
-### As a Claude Code plugin
-
 ```bash
 /plugin marketplace add emilhe/split-pr
 /plugin install split-pr@emilhe-split-pr
-```
-
-### CLI only
-
-```bash
-uv tool install split-pr
 ```
 
 ## Usage
