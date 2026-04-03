@@ -43,10 +43,14 @@ Write your output to `$RUN/discovery.json` with this structure:
       "topic-id": {
         "id": "topic-id",
         "name": "Human readable name",
-        "description": "What this topic covers",
+        "description": "A concise paragraph describing what this topic does and why. This becomes the PR summary — write it for a reviewer who hasn't seen the code.",
         "estimated_size": 150,
         "hunk_ids": ["abc123", "def456"],
-        "is_shared": false
+        "is_shared": false,
+        "key_files": [
+          {"path": "src/auth/model.py", "note": "Auth model with cached table lookup"},
+          {"path": "src/auth/service.py", "note": "Permission check helpers"}
+        ]
       }
     },
     "edges": [
@@ -58,6 +62,11 @@ Write your output to `$RUN/discovery.json` with this structure:
     "hunk-id-2": "topic-id-b"
   }
 }
+```
+
+The `key_files` field lists the most important files in the topic with a
+short annotation explaining what each one does. Limit to ~10 files. These
+appear in the PR description to help reviewers navigate the change.
 ```
 
 ## Process
@@ -101,7 +110,16 @@ topic that caused them to change — never become their own topic.
 ### Step 3: Identify topics
 
 Group hunks into semantic topics. A topic is a coherent "unit of work" that a
-reviewer would understand as one logical change. Good topics:
+reviewer would understand as one logical change.
+
+**Every topic MUST have a meaningful `description`** — a concise paragraph
+explaining what the topic does and why, written for a reviewer. This becomes
+the PR summary. Example: "Adds dual Snowflake connection support with a new
+`get_snowflake_engine` function that selects Azure (legacy) or AWS based on
+config. Includes a `SnowflakeDB` helper class for raw SQL execution and
+DataFrame queries." Do NOT leave it empty or repeat the topic name.
+
+Good topics:
 
 - "Add user authentication middleware"
 - "Refactor database connection pooling"

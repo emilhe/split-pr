@@ -31,6 +31,7 @@ allowed-tools:
   - Bash(gh pr edit *)
   - Bash(gh api *)
   - Bash(gh issue create *)
+  - Bash(gh repo view *)
   - Bash(bash /tmp/split-pr-*)
 ---
 
