@@ -75,51 +75,99 @@ def list_hunks(
 @app.command(name="show-hunks")
 def show_hunks(
     hunks_file: Path = typer.Argument(..., help="Path to hunks JSON"),
-    hunk_ids: str = typer.Argument(..., help="Comma-separated hunk IDs to inspect"),
+    hunk_ids: str = typer.Argument(None, help="Comma-separated hunk IDs to inspect"),
+    file_path: str = typer.Option(None, "--file", "-f", help="Filter by file path (substring match)"),
+    preview: int = typer.Option(0, "--preview", "-p", help="Show first N lines of each hunk's content"),
 ) -> None:
-    """Show detailed info for specific hunks by ID.
+    """Show detailed info for specific hunks.
 
-    Pass a comma-separated list of hunk IDs to see their file paths,
-    added/removed lines, and sizes.
+    Filter by hunk IDs (positional) or by file path (--file). Use --preview
+    to see the first N lines of each hunk's diff content.
     """
     data = json.loads(hunks_file.read_text())
-    ids_wanted = {h.strip() for h in hunk_ids.split(",")}
+    ids_wanted = {h.strip() for h in hunk_ids.split(",")} if hunk_ids else None
 
     found = set()
     for file_info in data["files"]:
         for h in file_info["hunks"]:
-            if h["id"] in ids_wanted:
-                found.add(h["id"])
-                total = h["added_lines"] + h["removed_lines"]
-                typer.echo(
-                    f"{h['id']} {h['file_path']:50} "
-                    f"+{h['added_lines']}/-{h['removed_lines']} = {total}"
-                )
+            # Filter by IDs if provided
+            if ids_wanted and h["id"] not in ids_wanted:
+                continue
+            # Filter by file path if provided
+            if file_path and file_path not in h["file_path"]:
+                continue
+            # If no filters, skip (don't dump everything)
+            if not ids_wanted and not file_path:
+                typer.echo("ERROR: provide hunk IDs or --file filter", err=True)
+                raise typer.Exit(1)
 
-    missing = ids_wanted - found
-    if missing:
-        for m in sorted(missing):
-            typer.echo(f"{m} NOT FOUND")
+            found.add(h["id"])
+            total = h["added_lines"] + h["removed_lines"]
+            section = f" {h.get('section_header', '')}" if h.get("section_header") else ""
+            typer.echo(
+                f"{h['id']} {h['file_path']:50} "
+                f"+{h['added_lines']}/-{h['removed_lines']} = {total}{section}"
+            )
+            if preview > 0 and h.get("content"):
+                lines = h["content"].split("\n")[:preview]
+                for line in lines:
+                    typer.echo(f"  {line[:120]}")
+                typer.echo()
+
+    if ids_wanted:
+        missing = ids_wanted - found
+        if missing:
+            for m in sorted(missing):
+                typer.echo(f"{m} NOT FOUND")
 
 
 @app.command(name="show-plan")
 def show_plan(
     plan_file: Path = typer.Argument(..., help="Path to plan JSON"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show per-branch file lists and dependencies"),
+    branch_id: str = typer.Option(None, "--branch", "-b", help="Show details for a single branch only"),
 ) -> None:
-    """Summarize a split plan: branches, sizes, base branches, hunk counts."""
+    """Summarize a split plan: branches, sizes, base branches, dependencies.
+
+    Use --verbose for per-branch file lists. Use --branch to inspect one branch.
+    """
     plan = json.loads(plan_file.read_text())
-    typer.echo(f"Base: {plan['original_base']}")
-    typer.echo(f"Branches: {plan['branch_count']}")
-    typer.echo(f"Total size: {plan['total_size']} lines")
-    typer.echo(f"Unassigned hunks: {plan['unassigned_count']}")
-    typer.echo()
+
+    # Build branch name → topic ID mapping for dependency display
+    name_to_topic: dict[str, str] = {}
+    for b in plan["branches"]:
+        name_to_topic[b["branch_name"]] = b["topic_id"]
+
+    if not branch_id:
+        typer.echo(f"Base: {plan['original_base']}")
+        typer.echo(f"Branches: {plan['branch_count']}")
+        typer.echo(f"Total size: {plan['total_size']} lines")
+        typer.echo(f"Unassigned hunks: {plan['unassigned_count']}")
+        typer.echo()
+
     for i, b in enumerate(plan["branches"], 1):
+        if branch_id and b["topic_id"] != branch_id:
+            continue
+
+        base_topic = name_to_topic.get(b["base_branch"], b["base_branch"])
         typer.echo(
             f"{i}. {b['topic_id']}  "
-            f"base={b['base_branch']}  "
-            f"branch={b['branch_name']}  "
-            f"{b['estimated_size']} lines, {b['hunk_count']} hunks"
+            f"{b['estimated_size']} lines, {b['hunk_count']} hunks  "
+            f"depends_on={base_topic}"
         )
+        typer.echo(f"   branch={b['branch_name']}")
+        typer.echo(f"   title={b.get('pr_title', '')}")
+
+        if verbose or branch_id:
+            # Show files touched by this branch
+            files: dict[str, int] = {}
+            for h in b["hunks"]:
+                fp = h.get("file_path", "?")
+                files[fp] = files.get(fp, 0) + h.get("size", 0)
+            typer.echo(f"   files ({len(files)}):")
+            for fp, size in sorted(files.items()):
+                typer.echo(f"     {fp} ({size} lines)")
+            typer.echo()
 
 
 @app.command()
@@ -158,6 +206,264 @@ def build_patches(
         patch_path.write_text(patch)
         lines = patch.count("\n")
         typer.echo(f"{branch['topic_id']}: {patch_path} ({lines} lines)")
+
+
+@app.command(name="create-branches")
+def create_branches(
+    diff_file: Path = typer.Argument(..., help="Path to unified diff file"),
+    plan_file: Path = typer.Argument(..., help="Path to plan JSON"),
+    repo_dir: Path = typer.Argument(..., help="Path to the git repository"),
+    author: str = typer.Option(None, "--author", "-a", help="Git author (e.g., 'Name <email>')"),
+    name_prefix: str = typer.Option("split", "--prefix", help="Branch name prefix"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be done without doing it"),
+) -> None:
+    """Create all split branches, apply patches, and commit.
+
+    Reads the plan, creates a branch for each topic in topological order,
+    applies the corresponding patch, and commits. All in one command —
+    one permission prompt instead of N*4.
+
+    Uses --3way fallback if clean apply fails. Stops on unresolvable failures.
+    """
+    parsed = parse_diff(diff_file.read_text())
+    plan = json.loads(plan_file.read_text())
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(repo_dir)] + list(args),
+            capture_output=True, text=True,
+        )
+
+    results = []
+    for i, branch in enumerate(plan["branches"], 1):
+        topic_id = branch["topic_id"]
+        branch_name = branch["branch_name"]
+        base_branch = branch["base_branch"]
+        title = branch.get("pr_title", topic_id)
+        total = plan["branch_count"]
+
+        typer.echo(f"\n[{i}/{total}] {topic_id}")
+
+        if dry_run:
+            typer.echo(f"  Would create {branch_name} from {base_branch}")
+            typer.echo(f"  Would apply patch with {branch['hunk_count']} hunks ({branch['estimated_size']} lines)")
+            results.append({"topic_id": topic_id, "status": "dry-run"})
+            continue
+
+        # Build the patch
+        hunk_ids = {h["id"] for h in branch["hunks"]}
+        patch = build_patch(parsed, hunk_ids)
+
+        if not patch.strip():
+            typer.echo(f"  WARNING: Empty patch for {topic_id}, skipping")
+            results.append({"topic_id": topic_id, "status": "empty"})
+            continue
+
+        # Write patch to temp file
+        patch_path = Path(f"/tmp/split-pr-patch-{topic_id}.patch")
+        patch_path.write_text(patch)
+
+        # Checkout base and create branch
+        r = git("checkout", base_branch)
+        if r.returncode != 0:
+            typer.echo(f"  ERROR: checkout {base_branch} failed: {r.stderr.strip()}", err=True)
+            raise typer.Exit(1)
+
+        r = git("checkout", "-b", branch_name)
+        if r.returncode != 0:
+            typer.echo(f"  ERROR: create branch failed: {r.stderr.strip()}", err=True)
+            raise typer.Exit(1)
+
+        # Apply patch: try clean first, then --3way
+        r = git("apply", "--check", str(patch_path))
+        if r.returncode == 0:
+            git("apply", str(patch_path))
+            typer.echo(f"  Patch applied cleanly")
+        else:
+            r = git("apply", "--3way", str(patch_path))
+            if r.returncode == 0:
+                typer.echo(f"  Patch applied with --3way")
+            else:
+                # Try --reject as last resort
+                r = git("apply", "--3way", "--reject", str(patch_path))
+                rej = subprocess.run(
+                    ["find", str(repo_dir), "-name", "*.rej"],
+                    capture_output=True, text=True,
+                )
+                if rej.stdout.strip():
+                    typer.echo(f"  FAILED: Unresolvable conflicts", err=True)
+                    typer.echo(f"  Reject files: {rej.stdout.strip()}", err=True)
+                    raise typer.Exit(1)
+                else:
+                    typer.echo(f"  Patch applied with --reject (no reject files)")
+
+        # Stage and commit
+        git("add", "-A")
+
+        commit_args = ["-m", f"{title}\n\nPart of split from branch '{name_prefix}'."]
+        if author:
+            commit_args = [f"--author={author}"] + commit_args
+
+        r = git("commit", *commit_args)
+        if r.returncode != 0:
+            if "nothing to commit" in r.stdout:
+                typer.echo(f"  WARNING: Nothing to commit")
+                results.append({"topic_id": topic_id, "status": "empty-commit"})
+                continue
+            typer.echo(f"  ERROR: commit failed: {r.stderr.strip()}", err=True)
+            raise typer.Exit(1)
+
+        # Get stats
+        stat = git("diff", "--stat", "HEAD~1..HEAD")
+        last_line = stat.stdout.strip().splitlines()[-1] if stat.stdout.strip() else ""
+        typer.echo(f"  Committed: {last_line}")
+
+        results.append({
+            "topic_id": topic_id,
+            "branch_name": branch_name,
+            "status": "ok",
+        })
+
+    # Summary
+    typer.echo(f"\n{'DRY RUN: ' if dry_run else ''}Created {len(results)} branches")
+    ok = sum(1 for r in results if r["status"] == "ok")
+    if ok < len(results):
+        warnings = [r for r in results if r["status"] != "ok"]
+        for w in warnings:
+            typer.echo(f"  {w['topic_id']}: {w['status']}")
+
+
+@app.command(name="push-branches")
+def push_branches(
+    plan_file: Path = typer.Argument(..., help="Path to plan JSON"),
+    repo_dir: Path = typer.Argument(..., help="Path to the git repository"),
+) -> None:
+    """Push all split branches to the remote. One command, one prompt."""
+    plan = json.loads(plan_file.read_text())
+
+    for i, branch in enumerate(plan["branches"], 1):
+        branch_name = branch["branch_name"]
+        typer.echo(f"[{i}/{plan['branch_count']}] Pushing {branch_name}...")
+        r = subprocess.run(
+            ["git", "-C", str(repo_dir), "push", "-u", "origin", branch_name],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            typer.echo(f"  ERROR: {r.stderr.strip()}", err=True)
+            raise typer.Exit(1)
+
+    typer.echo(f"\nPushed {plan['branch_count']} branches")
+
+
+@app.command(name="create-prs")
+def create_prs(
+    plan_file: Path = typer.Argument(..., help="Path to plan JSON"),
+    discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
+    repo: str = typer.Argument(..., help="GitHub repo (owner/name)"),
+    name: str = typer.Option("split", "--name", "-n", help="PR title prefix"),
+    original_branch: str = typer.Option("", "--branch", "-b", help="Original branch name for descriptions"),
+    links_out: Path = typer.Option(None, "--links-out", help="Write topic->PR URL mapping to this file"),
+) -> None:
+    """Create all PRs from split branches. One command, one prompt.
+
+    Creates PRs in topological order with DAG diagrams (highlighted per-PR).
+    After all PRs are created, updates descriptions with cross-references
+    and writes a links.json for clickable DAGs.
+    """
+    plan = json.loads(plan_file.read_text())
+    discovery = json.loads(discovery_file.read_text())
+    total = plan["branch_count"]
+
+    # Phase 1: Create PRs and collect URLs
+    pr_map: dict[str, dict] = {}  # topic_id -> {number, url}
+    for i, branch in enumerate(plan["branches"], 1):
+        topic_id = branch["topic_id"]
+        branch_name = branch["branch_name"]
+        base_branch = branch["base_branch"]
+        title = f"[{name} {i}/{total}] {branch.get('pr_title', topic_id)}"
+        body = f"## Summary\n\n{branch.get('pr_body', topic_id)}\n\n---\nGenerated by split-pr"
+
+        typer.echo(f"[{i}/{total}] Creating PR: {title}")
+
+        r = subprocess.run(
+            ["gh", "pr", "create",
+             "--repo", repo,
+             "--base", base_branch,
+             "--head", branch_name,
+             "--title", title,
+             "--body", body],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            typer.echo(f"  ERROR: {r.stderr.strip()}", err=True)
+            raise typer.Exit(1)
+
+        # gh pr create outputs the PR URL
+        pr_url = r.stdout.strip()
+        # Extract PR number from URL
+        pr_number = pr_url.rstrip("/").split("/")[-1] if pr_url else "?"
+        pr_map[topic_id] = {"number": pr_number, "url": pr_url}
+        typer.echo(f"  Created: {pr_url}")
+
+    # Build links file
+    links = {tid: info["url"] for tid, info in pr_map.items()}
+    if links_out:
+        links_out.write_text(json.dumps(links, indent=2))
+        typer.echo(f"\nLinks written to {links_out}")
+
+    # Phase 2: Update PR descriptions with DAG diagrams
+    typer.echo(f"\nUpdating PR descriptions with DAG diagrams...")
+    for i, branch in enumerate(plan["branches"], 1):
+        topic_id = branch["topic_id"]
+        info = pr_map[topic_id]
+
+        # Build highlighted DAG with links
+        dag_lines = ["```mermaid", "graph LR"]
+        for tid, tdata in discovery["dag"]["topics"].items():
+            tname = tdata.get("name", tid)
+            size = tdata.get("estimated_size", 0)
+            label = f"{tname}<br/>{size} lines"
+            if tid == topic_id:
+                dag_lines.append(f'    {tid}["{label}"]:::current')
+            else:
+                dag_lines.append(f'    {tid}["{label}"]')
+        for e in discovery["dag"].get("edges", []):
+            dag_lines.append(f"    {e['from']} --> {e['to']}")
+        dag_lines.append("")
+        for tid, url in links.items():
+            if tid in discovery["dag"]["topics"]:
+                dag_lines.append(f'    click {tid} href "{url}" _blank')
+        dag_lines.append("")
+        dag_lines.append("    classDef current fill:#4CAF50,stroke:#333,color:#fff,stroke-width:3px")
+        dag_lines.append("```")
+        dag = "\n".join(dag_lines)
+
+        # Build full body
+        title = branch.get("pr_title", topic_id)
+        body = f"""## Summary
+
+{branch.get('pr_body', topic_id)}
+
+## Position in split
+
+{dag}
+
+## Context
+
+This PR is part of a split from `{original_branch}` into smaller reviewable units.
+
+---
+Generated by split-pr"""
+
+        r = subprocess.run(
+            ["gh", "api", f"repos/{repo}/pulls/{info['number']}",
+             "-X", "PATCH", "-f", f"body={body}"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            typer.echo(f"  WARNING: Failed to update #{info['number']}: {r.stderr.strip()}")
+
+    typer.echo(f"\nDone! {total} PRs created and updated with DAG diagrams")
 
 
 @app.command()

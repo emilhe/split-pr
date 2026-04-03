@@ -15,11 +15,17 @@ validation, and creating PRs via `gh`.
 MUST go through the `split-pr-tools` CLI.** Use `split-pr-tools <command>`
 for all computational work.
 
-**IMPORTANT: NEVER use `cd <dir> && <command>` or any compound shell
-commands.** Compound commands trigger un-skippable permission prompts.
-Use absolute paths or `git -C <dir>` instead. For example:
-- BAD: `cd /path/to/repo && git checkout main`
-- GOOD: `git -C /path/to/repo checkout main`
+**IMPORTANT: NEVER use compound shell commands.** Each Bash call must be
+a single, simple command. ALL of these trigger un-skippable permission prompts:
+- `cd <dir> && <command>` — use `git -C <dir>` or absolute paths instead
+- `VAR=value && command` — inline the value directly
+- `command1 && command2` — use separate Bash calls
+- `command1 ; command2` — use separate Bash calls
+- `for x in ...` — write to a script file and run it
+
+Examples:
+- BAD: `REPO=/path && git -C "$REPO" checkout main`
+- GOOD: `git -C /path checkout main`
 - BAD: `cd /path && ruff check .`
 - GOOD: `ruff check /path/`
 
@@ -55,54 +61,23 @@ configured linters and test commands. Prefer fast validation (lint/typecheck)
 over slow (full test suite) during the splitting loop. Save full tests for
 the final pass.
 
-### Step 3: Build patches
+### Step 3: Create all branches in one command
 
-Build all patch files in one call:
-
-```bash
-split-pr-tools build-patches <diff-file> <plan-json>
-```
-
-This writes `$RUN/patch-<topic_id>.patch` for each branch and
-prints the mapping (`topic_id: patch_path`).
-
-### Step 4: Create branches and apply patches
-
-For each branch in topological order:
+Create all branches, apply patches, and commit — all in a single call:
 
 ```bash
-# Start from the correct base
-git checkout <base_branch>
-
-# Create the new branch
-git checkout -b <branch_name>
-
-# Apply the patch
-git apply --3way $RUN/patch-<topic_id>.patch
-
-# Commit
-git add -A
-git commit --author="<original_author>" -m "<commit_message>"
+split-pr-tools create-branches $RUN/diff.txt $RUN/plan.json <repo_dir> --author "<author>" --prefix "<name>"
 ```
 
-The `--3way` flag on `git apply` enables three-way merge, which handles
-cases where the patch doesn't apply cleanly (e.g., context lines differ
-because another topic's changes aren't present on this branch).
+This handles everything: creates branches in topological order, applies
+patches (with --3way fallback), commits with the correct author. One
+permission prompt for the entire operation.
 
-**If `git apply` fails:**
-1. Try `git apply --3way --reject` to apply what you can
-2. Read the `.rej` files to understand what failed
-3. Manually apply the rejected hunks by reading the source and editing
-4. Clean up `.rej` files
-5. If manual application fails, report the specific hunk and stop
+Use `--dry-run` first to preview what will happen.
 
-**Commit message format:**
-```
-<topic name>
-
-Part of split from branch '<original_branch>'.
-<topic description>
-```
+If `create-branches` fails on a specific topic, it stops and reports
+the issue. Fix the problem and re-run (it will skip already-created
+branches).
 
 ### Step 5: Fast validation
 
@@ -128,66 +103,30 @@ If validation finds issues:
 3. **Structural failure**: the split boundary is wrong. Report back with
    details about which topics are entangled and why. Do NOT try to force it.
 
-### Step 6: Push and create PRs
+### Step 6: Push branches and create PRs
 
-After all branches are created and validated, batch all operations into a
-single shell script to minimize permission prompts.
+All push, PR creation, and DAG diagram updates are handled by CLI commands —
+one permission prompt per command.
 
-**Write a script** to `$RUN/create-prs.sh` that does everything in one go:
-
-1. Pushes all branches
-2. Creates all PRs with DAG diagrams in descriptions
-3. Updates PR descriptions with cross-references after PR numbers are known
-
-The script should:
-
-**Phase A — Create PRs (without DAG links initially):**
-- Push each branch with `git push -u origin <branch_name>`
-- For each branch, create PR with `gh pr create` and capture the PR URL
-- Build a links JSON file (`$RUN/links.json`) mapping topic IDs to PR URLs:
-  ```json
-  {"topic-id": "https://github.com/org/repo/pull/123", ...}
-  ```
-
-**Phase B — Update PRs with clickable DAGs:**
-- For each PR, generate the per-PR DAG with links:
-  `split-pr-tools render-dag $RUN/discovery.json --highlight <topic_id> --links $RUN/links.json`
-- Update the PR body via `gh api` to include the clickable DAG
-- Generate the full DAG for the tracking issue:
-  `split-pr-tools render-dag-full $RUN/discovery.json $RUN/plan.json --links $RUN/links.json`
-
-Nodes in the DAG are clickable — clicking navigates to the corresponding PR.
-
-**Title format**: `[<name> N/total] <topic name>`
-
-**PR body template**:
-```
-## Summary
-<topic description>
-
-## Position in split
-<render-dag output with --highlight and --links>
-
-## Context
-This PR is part of a split from `<original_branch>` into smaller reviewable units.
-
-### Dependencies
-<which PRs must be merged before this one>
-
----
-Generated by split-pr
-```
-
-Then **run the script in a single bash call**:
+**Push all branches:**
 
 ```bash
-bash $RUN/create-prs.sh
+split-pr-tools push-branches $RUN/plan.json <repo_dir>
 ```
 
-After PRs are created, generate the full DAG for the tracking issue:
+**Create all PRs with clickable DAG diagrams:**
 
 ```bash
-split-pr-tools render-dag-full $RUN/discovery.json $RUN/plan.json
+split-pr-tools create-prs $RUN/plan.json $RUN/discovery.json <owner/repo> --name <name> --branch <original_branch> --links-out $RUN/links.json
+```
+
+This creates PRs in topological order, then updates each PR description
+with a highlighted Mermaid DAG where nodes link to the corresponding PRs.
+
+**Generate the full DAG for the tracking issue:**
+
+```bash
+split-pr-tools render-dag-full $RUN/discovery.json --links $RUN/links.json
 ```
 
 ### Step 7: Report results

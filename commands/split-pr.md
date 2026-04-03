@@ -15,11 +15,23 @@ allowed-tools:
   - Bash(git apply *)
   - Bash(git add *)
   - Bash(git commit *)
-  - Bash(git push *)
+  - Bash(git push -u *)
+  - Bash(git diff *)
+  - Bash(git log *)
+  - Bash(git -C * checkout *)
+  - Bash(git -C * apply *)
+  - Bash(git -C * add *)
+  - Bash(git -C * commit *)
+  - Bash(git -C * push -u *)
+  - Bash(git -C * diff *)
+  - Bash(git -C * log *)
+  - Bash(git -C * status *)
+  - Bash(git -C * branch *)
   - Bash(gh pr create *)
   - Bash(gh pr edit *)
   - Bash(gh api *)
   - Bash(gh issue create *)
+  - Bash(bash /tmp/split-pr-*)
 ---
 
 # Split PR
@@ -43,9 +55,27 @@ ALL Python operations go through the `split-pr-tools` CLI:
 split-pr-tools <command> <args>
 ```
 
-Available commands: `parse-diff`, `stats`, `list-hunks`, `show-hunks`,
-`show-plan`, `build-plan`, `build-patches`, `check-sizes`,
-`validate-discovery`, `verify`, `detect-validators`
+Available commands:
+
+| Command | Purpose |
+|---------|---------|
+| `parse-diff <diff>` | Parse unified diff into hunks JSON |
+| `stats <hunks>` | Summary: file count, hunk count, per-file sizes |
+| `list-hunks <hunks>` | All files with hunk IDs, sizes, flags |
+| `show-hunks <hunks> [ids] --file X --preview N` | Inspect hunks by ID or file path, with content preview |
+| `show-plan <plan> -v --branch X` | Plan summary with dependencies, files per branch. **Branches are in merge order.** |
+| `build-plan <diff> <discovery> <base> <threshold>` | Generate split plan from discovery |
+| `build-patches <diff> <plan> -o <dir>` | Write patch files for each branch |
+| `create-branches <diff> <plan> <repo> --author X --prefix X` | Create all branches, apply patches, commit (one command) |
+| `push-branches <plan> <repo>` | Push all split branches to remote (one command) |
+| `create-prs <plan> <discovery> <owner/repo> --name X --branch X` | Create all PRs with DAG diagrams (one command) |
+| `check-sizes <diff> <discovery> <threshold>` | Report oversized topics |
+| `validate-discovery <hunks> <discovery>` | Check assignments, cycles, topic stats |
+| `verify <diff> <plan>` | Verify split is lossless before execution |
+| `render-dag <discovery> -h <topic> -l <links>` | Mermaid DAG, highlighted node, clickable |
+| `render-dag-full <discovery> [plan] -l <links>` | Full DAG for tracking issue |
+| `score <discovery> <gt> [hunks]` | Score against ground truth |
+| `detect-validators` | Detect ruff/tsc/pytest/etc in CWD |
 
 If you need something the CLI doesn't provide, report it as a gap — do NOT
 work around it with inline Python.
