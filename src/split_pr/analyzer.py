@@ -364,6 +364,132 @@ def split_new_file_hunk(
     return virtual_hunks
 
 
+def _split_existing_hunk(
+    hunk: dict, decls: list[Declaration], file_path: str,
+) -> list[dict[str, Any]]:
+    """Split an existing (non-new-file) hunk that spans multiple declarations.
+
+    Parses the diff content to identify which lines belong to which
+    declaration, and creates virtual sub-hunks per declaration.
+
+    Returns empty list if splitting isn't feasible (e.g., lines can't be
+    cleanly attributed to declarations).
+    """
+    content = hunk.get("content", "")
+    hunk_target_start = hunk.get("target_start", 0)
+    lines = content.splitlines()
+    if not lines:
+        return []
+
+    # Skip the @@ header line
+    body_lines = []
+    header_line = ""
+    for line in lines:
+        if line.startswith("@@"):
+            header_line = line
+        else:
+            body_lines.append(line)
+
+    if not body_lines:
+        return []
+
+    # Map each diff line to a target line number
+    # Context lines and + lines advance the target counter
+    # - lines don't advance it
+    line_assignments: list[tuple[str, int, str | None]] = []  # (diff_line, target_line, decl_name)
+    target_line = hunk_target_start
+    for diff_line in body_lines:
+        if diff_line.startswith("-"):
+            # Removed line — attribute to whichever decl owns this source line
+            # Use the current target_line as approximation
+            assigned = None
+            for d in decls:
+                if d.start_line <= target_line <= d.end_line:
+                    assigned = d.name
+                    break
+            line_assignments.append((diff_line, target_line, assigned))
+        elif diff_line.startswith("+"):
+            # Added line
+            assigned = None
+            for d in decls:
+                if d.start_line <= target_line <= d.end_line:
+                    assigned = d.name
+                    break
+            line_assignments.append((diff_line, target_line, assigned))
+            target_line += 1
+        else:
+            # Context line
+            assigned = None
+            for d in decls:
+                if d.start_line <= target_line <= d.end_line:
+                    assigned = d.name
+                    break
+            line_assignments.append((diff_line, target_line, assigned))
+            target_line += 1
+
+    # Group consecutive lines by declaration
+    groups: list[tuple[str | None, list[str]]] = []
+    current_decl = None
+    current_lines: list[str] = []
+    for diff_line, _, decl_name in line_assignments:
+        if decl_name != current_decl and current_lines:
+            groups.append((current_decl, current_lines))
+            current_lines = []
+        current_decl = decl_name
+        current_lines.append(diff_line)
+    if current_lines:
+        groups.append((current_decl, current_lines))
+
+    # Only split if we got at least 2 non-trivial groups
+    non_trivial = [(name, lines) for name, lines in groups
+                   if any(l.startswith("+") or l.startswith("-") for l in lines)]
+    if len(non_trivial) < 2:
+        return []
+
+    # Build virtual hunks per group
+    virtual_hunks: list[dict[str, Any]] = []
+    running_target = hunk_target_start
+
+    for group_name, group_lines in groups:
+        added = sum(1 for l in group_lines if l.startswith("+"))
+        removed = sum(1 for l in group_lines if l.startswith("-"))
+        context = sum(1 for l in group_lines if not l.startswith("+") and not l.startswith("-"))
+
+        if added == 0 and removed == 0:
+            # Pure context — attach to next group
+            running_target += context
+            continue
+
+        source_len = removed + context
+        target_len = added + context
+
+        hunk_header = f"@@ -{running_target},{source_len} +{running_target},{target_len} @@ {group_name or ''}"
+        group_content = hunk_header + "\n" + "\n".join(group_lines)
+
+        raw = f"{file_path}:{hunk['id']}:{group_name}:{running_target}"
+        virtual_id = hashlib.sha256(raw.encode()).hexdigest()[:12]
+
+        virtual_hunks.append({
+            "id": virtual_id,
+            "file_path": file_path,
+            "source_start": running_target,
+            "source_length": source_len,
+            "target_start": running_target,
+            "target_length": target_len,
+            "content": group_content,
+            "added_lines": added,
+            "removed_lines": removed,
+            "section_header": group_name or "",
+            "scope": [group_name] if group_name else [],
+            "is_virtual": True,
+            "original_hunk_id": hunk["id"],
+        })
+
+        running_target += context + added
+
+    return virtual_hunks if len(virtual_hunks) >= 2 else []
+
+
 def enrich_hunks(hunks_data: dict, source_dir: str | None = None) -> dict:
     """Enrich a hunks.json structure with AST analysis.
 
@@ -406,7 +532,7 @@ def enrich_hunks(hunks_data: dict, source_dir: str | None = None) -> dict:
                     new_hunks.extend(virtual)
                     continue
 
-            # Enrich existing hunks with scope info
+            # Enrich existing hunks with scope info and split if multi-scope
             if source_dir and ext in LANGUAGE_MAP:
                 source_path = Path(source_dir) / file_info["path"]
                 if source_path.exists():
@@ -420,6 +546,13 @@ def enrich_hunks(hunks_data: dict, source_dir: str | None = None) -> dict:
                         if d.start_line <= hunk_end and d.end_line >= hunk_start:
                             scope.append(d.name)
                     hunk["scope"] = scope
+
+                    # If hunk spans multiple declarations, try to split it
+                    if len(scope) >= 2:
+                        split = _split_existing_hunk(hunk, decls, file_info["path"])
+                        if split:
+                            new_hunks.extend(split)
+                            continue
 
             new_hunks.append(hunk)
 
