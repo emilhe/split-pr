@@ -117,8 +117,15 @@ split-pr-tools push-branches $RUN/plan.json <repo_dir>
 **Create all PRs with clickable DAG diagrams:**
 
 ```bash
-split-pr-tools create-prs $RUN/plan.json $RUN/discovery.json <owner/repo> --name <name> --branch <original_branch> --links-out $RUN/links.json
+split-pr-tools create-prs $RUN/plan.json $RUN/discovery.json <owner/repo> --name <name> --branch <original_branch> --original-pr <url> --tracking-issue <url> --links-out $RUN/links.json
 ```
+
+Find the original PR URL with `gh pr list --head <branch> --json url`.
+Create the tracking issue first, then pass its URL to `create-prs`.
+
+Each PR gets: Summary (content first), then Context (PR N of M with links
+to original split, previous PR, and next PR), then a clickable DAG with
+the current topic highlighted in green.
 
 This creates PRs in topological order, then updates each PR description
 with a highlighted Mermaid DAG where nodes link to the corresponding PRs.
