@@ -74,6 +74,7 @@ Available commands:
 | `check-sizes <diff> <discovery> <threshold>` | Report oversized topics |
 | `validate-discovery <hunks> <discovery>` | Check assignments, cycles, topic stats |
 | `verify <diff> <plan>` | Verify split is lossless before execution |
+| `verify-git <plan> <repo> <branch>` | Verify split branches reproduce original branch exactly |
 | `render-dag <discovery> -h <topic> -l <links>` | Mermaid DAG, highlighted node, clickable |
 | `render-dag-full <discovery> [plan] -l <links>` | Full DAG for tracking issue |
 | `score <discovery> <gt> [hunks]` | Score against ground truth |
@@ -210,6 +211,14 @@ Pass it:
 
 The agent works in an isolated worktree, creates branches, applies patches,
 validates, and creates PRs.
+
+After branch creation, verify the result matches the original:
+
+```bash
+split-pr-tools verify-git $RUN/plan.json <repo_dir> <original_branch>
+```
+
+If this fails, the split lost or altered changes — DO NOT proceed to PR creation.
 
 ### Phase 7: Report
 

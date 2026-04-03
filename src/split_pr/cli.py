@@ -375,6 +375,64 @@ def create_branches(
             typer.echo(f"  {w['topic_id']}: {w['status']}")
 
 
+@app.command(name="verify-git")
+def verify_git(
+    plan_file: Path = typer.Argument(..., help="Path to plan JSON"),
+    repo_dir: Path = typer.Argument(..., help="Path to the git repository"),
+    original_branch: str = typer.Argument(..., help="Original branch to compare against"),
+) -> None:
+    """Verify the split branches reproduce the original branch exactly.
+
+    Checks out the last branch in the chain and diffs it against the
+    original branch. If the diff is empty, the split is perfect.
+    Run after create-branches, before push-branches.
+    """
+    plan = json.loads(plan_file.read_text())
+    branches = plan["branches"]
+
+    if not branches:
+        typer.echo("ERROR: No branches in plan", err=True)
+        raise typer.Exit(1)
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(repo_dir)] + list(args),
+            capture_output=True, text=True,
+        )
+
+    # The last branch in the chain should contain all changes
+    last_branch = branches[-1]["branch_name"]
+
+    typer.echo(f"Comparing {last_branch} against {original_branch}...")
+
+    # Diff the last split branch against the original
+    r = git("diff", f"{last_branch}..{original_branch}")
+
+    if r.returncode != 0:
+        typer.echo(f"ERROR: git diff failed: {r.stderr.strip()}", err=True)
+        raise typer.Exit(1)
+
+    diff_output = r.stdout.strip()
+
+    if not diff_output:
+        typer.echo("VERIFIED: Split branches reproduce the original branch exactly.")
+    else:
+        # Count what's different
+        diff_lines = diff_output.splitlines()
+        added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+        removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+
+        # Show which files differ
+        r_stat = git("diff", "--stat", f"{last_branch}..{original_branch}")
+
+        typer.echo("MISMATCH: Split branches do not reproduce the original branch.")
+        typer.echo(f"  Diff: +{added}/-{removed} lines")
+        if r_stat.stdout.strip():
+            typer.echo(f"  Files:\n{r_stat.stdout.strip()}")
+        typer.echo("\nThis means some changes were lost or altered during splitting.")
+        raise typer.Exit(1)
+
+
 @app.command(name="push-branches")
 def push_branches(
     plan_file: Path = typer.Argument(..., help="Path to plan JSON"),
