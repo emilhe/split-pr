@@ -339,6 +339,134 @@ def verify(
         raise typer.Exit(1)
 
 
+@app.command(name="render-dag")
+def render_dag(
+    discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
+    highlight: str = typer.Option(None, "--highlight", "-h", help="Topic ID to highlight (for per-PR views)"),
+    links_file: Path = typer.Option(None, "--links", "-l", help="JSON file mapping topic IDs to PR URLs"),
+) -> None:
+    """Render the topic DAG as a Mermaid diagram.
+
+    Outputs a Mermaid graph definition that GitHub renders natively
+    in markdown. Use --highlight to mark a specific topic. Use --links
+    to make nodes clickable (linking to their PRs).
+    """
+    discovery = json.loads(discovery_file.read_text())
+    links: dict[str, str] = json.loads(links_file.read_text()) if links_file else {}
+
+    if "dag" not in discovery:
+        typer.echo("ERROR: No DAG found in discovery", err=True)
+        raise typer.Exit(1)
+
+    dag_data = discovery["dag"]
+    topics = dag_data["topics"]
+    edges = dag_data.get("edges", [])
+
+    lines = ["```mermaid", "graph LR"]
+
+    # Node definitions with labels
+    for tid, tdata in topics.items():
+        name = tdata.get("name", tid)
+        size = tdata.get("estimated_size", 0)
+        label = f"{name}<br/>{size} lines"
+        if highlight and tid == highlight:
+            lines.append(f'    {tid}["{label}"]:::current')
+        else:
+            lines.append(f'    {tid}["{label}"]')
+
+    # Edges
+    for e in edges:
+        lines.append(f"    {e['from']} --> {e['to']}")
+
+    # Click links to PRs
+    if links:
+        lines.append("")
+        for tid, url in links.items():
+            if tid in topics:
+                lines.append(f'    click {tid} href "{url}" _blank')
+
+    # Styles
+    lines.append("")
+    lines.append("    classDef current fill:#4CAF50,stroke:#333,color:#fff,stroke-width:3px")
+
+    lines.append("```")
+
+    typer.echo("\n".join(lines))
+
+
+@app.command(name="render-dag-full")
+def render_dag_full(
+    discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
+    plan_file: Path = typer.Argument(None, help="Path to plan JSON (adds PR numbers/branch info)"),
+    links_file: Path = typer.Option(None, "--links", "-l", help="JSON file mapping topic IDs to PR URLs"),
+) -> None:
+    """Render the full DAG for the tracking issue.
+
+    Includes topic sizes, PR numbers (if plan provided), parallel
+    group annotations, and clickable links to PRs (if --links provided).
+    """
+    discovery = json.loads(discovery_file.read_text())
+    plan = json.loads(plan_file.read_text()) if plan_file else None
+    links: dict[str, str] = json.loads(links_file.read_text()) if links_file else {}
+
+    dag_data = discovery["dag"]
+    topics = dag_data["topics"]
+    edges = dag_data.get("edges", [])
+
+    # Build topic-to-branch mapping from plan
+    topic_info: dict[str, dict] = {}
+    if plan:
+        for i, b in enumerate(plan["branches"], 1):
+            topic_info[b["topic_id"]] = {
+                "index": i,
+                "total": plan["branch_count"],
+                "size": b["estimated_size"],
+                "base": b["base_branch"],
+            }
+
+    lines = ["```mermaid", "graph LR"]
+
+    # Node definitions
+    for tid, tdata in topics.items():
+        name = tdata.get("name", tid)
+        size = tdata.get("estimated_size", 0)
+        info = topic_info.get(tid)
+        if info:
+            label = f"#{info['index']}/{info['total']} {name}<br/>{size} lines"
+        else:
+            label = f"{name}<br/>{size} lines"
+
+        lines.append(f'    {tid}["{label}"]')
+
+    # Edges
+    for e in edges:
+        lines.append(f"    {e['from']} --> {e['to']}")
+
+    # Find independent groups (nodes with no edges between them)
+    # by checking weakly connected components
+    dag = TopicDAG.from_dict(dag_data)
+    groups = dag.independent_groups()
+    if len(groups) > 1:
+        lines.append("")
+        for i, group in enumerate(groups):
+            if len(group) > 1:
+                lines.append(f"    subgraph group{i}[Parallel group {i+1}]")
+                for tid in sorted(group):
+                    lines.append(f"        {tid}")
+                lines.append("    end")
+
+    # Click links to PRs
+    if links:
+        lines.append("")
+        for tid, url in links.items():
+            if tid in topics:
+                lines.append(f'    click {tid} href "{url}" _blank')
+
+    lines.append("```")
+
+    typer.echo("\n".join(lines))
+
+
 @app.command()
 def detect_validators() -> None:
     """Detect available validation tools in the current directory."""

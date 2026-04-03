@@ -16,6 +16,10 @@ within a diff and how they relate to each other.
 MUST go through the `split-pr-tools` CLI.** Use `split-pr-tools <command>`
 for all computational work.
 
+**IMPORTANT: NEVER use `cd <dir> && <command>` or any compound shell
+commands.** Compound commands trigger un-skippable permission prompts.
+Use absolute paths or `git -C <dir>` instead.
+
 ## Inputs
 
 You receive:
@@ -112,12 +116,19 @@ Bad topics (too broad):
 Guidelines for classification:
 - **By purpose, not by file**: a feature may touch models, API, tests, and
   frontend — those are all one topic if they serve the same purpose.
-  The reverse also applies: a single file with multiple hunks serving
-  different purposes should be split across topics. For example, an
-  adapter file that contains one adapter per feature should have each
-  adapter's hunks assigned to the corresponding feature topic — NOT
-  grouped as one "adapter" topic just because it's one file. Always
-  classify at the hunk level, not the file level.
+- **IMPORTANT — Single files with multiple concerns MUST be split**: When
+  a file has hunks serving different purposes, assign each hunk to the
+  topic it serves. The tooling handles this correctly — `build_patch`
+  generates partial diffs, so PR #1 can apply hunks 1-3 of a file while
+  PR #2 applies hunks 4-6 of the same file. The file appears in both PRs
+  but with different changes. This is especially important for:
+  - **Adapter/bridge files** with one function per feature
+  - **Route files** registering multiple endpoints
+  - **Config files** with settings for different subsystems
+  - **`__init__.py` exports** grouping unrelated public APIs
+  Do NOT create a standalone topic for such files. Do NOT say "can't split
+  because it's one file" — that reasoning is incorrect with hunk-level
+  patching.
 - **Shared infrastructure**: if code serves multiple topics (utilities, types,
   config), make it a separate topic marked `is_shared: true`. This becomes a
   foundational PR that others depend on.
