@@ -61,6 +61,7 @@ Available commands:
 | Command | Purpose |
 |---------|---------|
 | `parse-diff <diff>` | Parse unified diff into hunks JSON |
+| `analyze <hunks> <repo_dir>` | Enrich hunks with AST analysis, split large new files |
 | `stats <hunks>` | Summary: file count, hunk count, per-file sizes |
 | `list-hunks <hunks>` | All files with hunk IDs, sizes, flags |
 | `show-hunks <hunks> [ids] --file X --preview N` | Inspect hunks by ID or file path, with content preview |
@@ -125,21 +126,27 @@ git diff <base>...HEAD > $RUN/diff.txt
 
 If the diff is empty, tell the user and stop.
 
-### Phase 2: Parse the diff
-
-Run these two commands in sequence — they give you everything you need:
+### Phase 2: Parse and analyze the diff
 
 ```bash
 split-pr-tools parse-diff $RUN/diff.txt > $RUN/hunks.json
 ```
 
 ```bash
+split-pr-tools analyze $RUN/hunks.json <repo_dir>
+```
+
+The `analyze` command enriches hunks with AST analysis using tree-sitter:
+- Splits large new-file hunks into per-declaration virtual hunks
+- Adds scope info (which function/class each hunk is inside)
+- This enables hunk-level splitting of files like adapter.py
+
+```bash
 split-pr-tools stats $RUN/hunks.json
 ```
 
-The `stats` command outputs file count, hunk count, total lines, and a
-per-file breakdown with sizes, hunk counts, and [new]/[deleted] flags.
-This is the complete summary — do NOT parse the JSON yourself.
+Report the summary to the user. If total size is under the threshold, tell
+the user the PR is already small enough and stop (unless they insist).
 
 Report the summary to the user. If total size is under the threshold, tell
 the user the PR is already small enough and stop (unless they insist).

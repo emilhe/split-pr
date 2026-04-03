@@ -7,7 +7,9 @@ dependencies = [
     "unidiff>=0.7",
     "networkx>=3.0",
     "typer>=0.12",
+    "tree-sitter>=0.23",
 ]
+
 
 [project.scripts]
 split-pr-tools = "split_pr.cli:app"
@@ -15,6 +17,12 @@ split-pr-tools = "split_pr.cli:app"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+]
+languages = [
+    "tree-sitter-python>=0.23",
+    "tree-sitter-typescript>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-go>=0.23",
 ]
 
 [build-system]

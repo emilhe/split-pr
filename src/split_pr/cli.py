@@ -34,6 +34,48 @@ def parse_diff_cmd(
 
 
 @app.command()
+def analyze(
+    hunks_file: Path = typer.Argument(..., help="Path to hunks JSON from parse-diff"),
+    source_dir: Path = typer.Argument(..., help="Path to the repo root (for reading source files)"),
+    output_file: Path = typer.Argument(None, help="Output file (default: overwrite hunks file)"),
+    min_split_size: int = typer.Option(100, "--min-split", help="Only split new files larger than this"),
+) -> None:
+    """Enrich hunks with AST analysis using tree-sitter.
+
+    For each hunk, adds scope (what declaration it's inside), symbols_defined,
+    and symbols_referenced. For large new-file hunks, splits them into
+    per-declaration virtual hunks.
+
+    Run after parse-diff, before discovery:
+        parse-diff → analyze → stats → discovery
+    """
+    from split_pr.analyzer import enrich_hunks
+
+    hunks_data = json.loads(hunks_file.read_text())
+    enriched = enrich_hunks(hunks_data, str(source_dir))
+
+    out = output_file or hunks_file
+    out.write_text(json.dumps(enriched, indent=2))
+
+    # Report what changed
+    original_count = json.loads(hunks_file.read_text())["hunk_count"] if output_file else hunks_data["hunk_count"]
+    new_count = enriched["hunk_count"]
+    virtual = sum(
+        1 for f in enriched["files"] for h in f["hunks"]
+        if isinstance(h, dict) and h.get("is_virtual")
+    )
+    typer.echo(f"Analyzed {enriched['file_count']} files, {new_count} hunks")
+    if virtual:
+        typer.echo(f"Split {virtual} virtual hunks from large new files")
+    scoped = sum(
+        1 for f in enriched["files"] for h in f["hunks"]
+        if isinstance(h, dict) and h.get("scope")
+    )
+    if scoped:
+        typer.echo(f"Added scope info to {scoped} hunks")
+
+
+@app.command()
 def stats(
     hunks_file: Path = typer.Argument(..., help="Path to hunks JSON from parse-diff"),
 ) -> None:
