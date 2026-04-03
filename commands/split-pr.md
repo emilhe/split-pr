@@ -6,7 +6,7 @@ description: >
   a large branch into smaller pieces. Accepts optional arguments:
   --base <branch> (default: main), --threshold <lines> (default: 400),
   --max-files <n> (default: 10), --auto (skip interactive reviews),
-  --linear (force linear chain instead of DAG).
+  --dag (use DAG-based branching instead of default linear chain).
 user-invocable: true
 allowed-tools:
   - Bash(split-pr-tools *)
@@ -90,7 +90,7 @@ Parse the user's input after `/split-pr` for these optional flags:
 | `--threshold <n>` | `400` | Max lines per split PR |
 | `--max-files <n>` | `10` | Max files per split PR |
 | `--auto` | off | Skip interactive review steps |
-| `--linear` | off | Linearize DAG into a single chain |
+| `--dag` | off | Use DAG-based branching (parallel review, but PRs may not pass tests individually) |
 | `--name <label>` | branch name (truncated to 20 chars) | Short label for PR title prefix |
 | `--pr <number>` | none | Analyze an existing PR instead of current branch |
 
@@ -196,7 +196,7 @@ Launch the `pr-splitter` agent **in a worktree** to execute the plan.
 
 Pass it:
 - The run directory: `$RUN`
-- Whether to linearize: `--linear` flag
+- Whether to use DAG branching: `--dag` flag (default is linear)
 - The `--name` label (for PR title prefix)
 - The original branch name (for reference in PR descriptions)
 
