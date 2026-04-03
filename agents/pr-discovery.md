@@ -71,7 +71,18 @@ appear in the PR description to help reviewers navigate the change.
 
 ## Process
 
-### Step 1: Read and understand the hunks
+### Step 1: Use commit history as initial hypotheses
+
+Run `git log --oneline <base>...HEAD` to see how the author organized
+their work. Commit messages are the strongest signal for topic boundaries —
+the author already grouped changes into logical units. Use these as your
+starting hypotheses for topics, then validate and refine based on hunk
+analysis.
+
+Don't blindly trust commit boundaries (commits may mix topics), but don't
+ignore them either. If a commit is clearly one topic, keep it together.
+
+### Step 2: Read and understand the hunks
 
 Get the full file listing with hunk IDs using the CLI:
 
@@ -91,7 +102,7 @@ directory to understand context:
 Don't read every file exhaustively — focus on understanding enough to classify
 each hunk.
 
-### Step 2: Identify generated/vendor code
+### Step 3: Identify generated/vendor code
 
 Before classifying, tag hunks from paths that are generated or vendored.
 These should NOT count toward size thresholds and should stay with their
@@ -107,7 +118,7 @@ source changes (never split away). Common patterns:
 Tag these hunks as `generated: true` in your notes. They travel with the
 topic that caused them to change — never become their own topic.
 
-### Step 3: Identify topics
+### Step 4: Identify topics
 
 Group hunks into semantic topics. A topic is a coherent "unit of work" that a
 reviewer would understand as one logical change.
@@ -156,6 +167,17 @@ Guidelines for classification:
   a tests-only PR lacks context. Assign `test_foo.py` to the same topic
   as `foo.py`. The only exception is pure test infrastructure (conftest
   fixtures, test utilities) that serves multiple topics.
+- **Scripts and tools MUST follow their subject**: dev scripts, CLI helpers,
+  and manual testing tools belong to the topic they exercise — not a catch-all
+  "scripts" or "tooling" bucket. `scripts/get_token.py` goes with auth,
+  `scripts/test_connection.py` goes with database infrastructure,
+  `scripts/test_endpoints.py` goes with the endpoints it tests.
+- **NEVER create catch-all topics**: Topics like "misc", "docs-and-tooling",
+  "cleanup", "various fixes", or "other changes" are forbidden. Every hunk
+  must be assigned based on its semantic purpose. If a file doesn't clearly
+  belong to a feature topic, it's more likely infrastructure or a dependency
+  of a specific topic than "miscellaneous." If you're tempted to create a
+  catch-all, re-examine each file in it and assign it properly.
 - **Renames/moves**: if a file was renamed as part of a larger change, keep
   it with that change. If it's a standalone rename, it can be its own topic.
 
@@ -197,7 +219,7 @@ When analyzing, look for these recurring structures:
 
 These patterns produce natural topic boundaries and dependency ordering.
 
-### Step 4: Identify dependencies
+### Step 5: Identify dependencies
 
 For each pair of topics, determine if one depends on the other:
 - Topic B **depends on** topic A if B's code imports, calls, or references
@@ -215,7 +237,7 @@ Use the Python DAG to validate as you go. Write discovery state to
 split-pr-tools check-sizes $RUN/diff.txt $RUN/discovery.json <threshold>
 ```
 
-### Step 5: Check sizes and decompose
+### Step 6: Check sizes and decompose
 
 After initial classification, check each topic's size against the threshold:
 
@@ -235,7 +257,7 @@ Repeat until all topics are under the threshold, or a topic genuinely can't
 be split further (e.g., a single large file change that's all one concern).
 Limit recursion to 3 levels deep.
 
-### Step 6: Handle entanglement
+### Step 7: Handle entanglement
 
 If you find hunks that resist clean classification:
 - A utility function used by multiple topics: create a shared topic
@@ -245,7 +267,7 @@ If you find hunks that resist clean classification:
   function serve different purposes, assign each hunk to its primary topic
   and note the dependency
 
-### Step 7: Validate and write output
+### Step 8: Validate and write output
 
 Write the output to `$RUN/discovery.json`, then validate it:
 
