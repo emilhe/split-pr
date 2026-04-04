@@ -24,6 +24,28 @@ from split_pr.state import SplitPlanner
 app = typer.Typer(help="Split-PR tools — called by the split-pr skill and agents.")
 
 
+def _get_assignments(discovery: dict) -> dict[str, str]:
+    """Get hunk-to-topic assignments, deriving from hunk_ids if needed.
+
+    The discovery agent may write assignments as either:
+    - Top-level "assignments" dict: {"hunk_id": "topic_id", ...}
+    - Per-topic "hunk_ids" lists in dag.topics
+
+    This function normalizes to the flat dict format.
+    """
+    if "assignments" in discovery and discovery["assignments"]:
+        return discovery["assignments"]
+
+    # Derive from hunk_ids in topics
+    assignments: dict[str, str] = {}
+    if "dag" in discovery and "topics" in discovery["dag"]:
+        for topic_id, topic in discovery["dag"]["topics"].items():
+            for hunk_id in topic.get("hunk_ids", []):
+                assignments[hunk_id] = topic_id
+
+    return assignments
+
+
 @app.command(name="parse-diff")
 def parse_diff_cmd(
     diff_file: Path = typer.Argument(..., help="Path to unified diff file"),
@@ -223,10 +245,9 @@ def build_plan(
     parsed = parse_diff(diff_file.read_text())
     discovery = json.loads(discovery_file.read_text())
     dag = TopicDAG.from_dict(discovery["dag"])
-    assignments = discovery["assignments"]
 
     planner = SplitPlanner(parsed, dag, base_branch=base, size_threshold=threshold)
-    planner.assign_hunks(assignments)
+    planner.assign_hunks(_get_assignments(discovery))
     plan = planner.build_plan()
     typer.echo(planner.plan_to_json(plan))
 
@@ -633,10 +654,9 @@ def check_sizes(
     parsed = parse_diff(diff_file.read_text())
     discovery = json.loads(discovery_file.read_text())
     dag = TopicDAG.from_dict(discovery["dag"])
-    assignments = discovery["assignments"]
 
     planner = SplitPlanner(parsed, dag, size_threshold=threshold)
-    planner.assign_hunks(assignments)
+    planner.assign_hunks(_get_assignments(discovery))
     oversized = planner.get_oversized_topics()
 
     if not oversized:
@@ -667,7 +687,8 @@ def validate_discovery(
             all_hunk_ids.add(h["id"])
             hunk_file_map[h["id"]] = h["file_path"]
 
-    assigned_ids = set(discovery["assignments"].keys())
+    assignments = _get_assignments(discovery)
+    assigned_ids = set(assignments.keys())
 
     # Coverage check
     missing = all_hunk_ids - assigned_ids
@@ -700,7 +721,6 @@ def validate_discovery(
 
     # Per-topic stats
     typer.echo("\nTopic hunk counts:")
-    assignments = discovery["assignments"]
     for tid in order:
         topic = dag.topics[tid]
         topic_hunks = [hid for hid, t in assignments.items() if t == tid]
