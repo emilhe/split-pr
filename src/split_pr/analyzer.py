@@ -490,7 +490,8 @@ def _split_existing_hunk(
     return virtual_hunks if len(virtual_hunks) >= 2 else []
 
 
-def enrich_hunks(hunks_data: dict, source_dir: str | None = None) -> dict:
+def enrich_hunks(hunks_data: dict, source_dir: str | None = None,
+                  skip_patterns: tuple[str, ...] = ()) -> dict:
     """Enrich a hunks.json structure with AST analysis.
 
     For each hunk:
@@ -506,20 +507,11 @@ def enrich_hunks(hunks_data: dict, source_dir: str | None = None) -> dict:
     """
     from pathlib import Path
 
-    # Paths that should NOT be split — vendored/shim/generated code
-    SKIP_PATTERNS = (
-        "_legacy/_shims/", "_shims/", "vendor/", "node_modules/",
-        "_vendor/", "third_party/", "generated/",
-    )
-
-    def _should_skip(path: str) -> bool:
-        return any(pattern in path for pattern in SKIP_PATTERNS)
-
     new_files = []
     for file_info in hunks_data["files"]:
         ext = PurePosixPath(file_info["path"]).suffix
         is_new = file_info.get("is_new", False)
-        skip = _should_skip(file_info["path"])
+        skip = any(pattern in file_info["path"] for pattern in skip_patterns)
 
         # Try to read source file for new-file splitting (skip vendored code)
         source_content = None

@@ -85,6 +85,7 @@ def analyze(
     source_dir: Path = typer.Argument(..., help="Path to the repo root (for reading source files)"),
     output_file: Path = typer.Argument(None, help="Output file (default: overwrite hunks file)"),
     min_split_size: int = typer.Option(100, "--min-split", help="Only split new files larger than this"),
+    bulk: str = typer.Option("", "--bulk", help="Comma-separated path patterns to skip (vendored/bulk code)"),
 ) -> None:
     """Enrich hunks with AST analysis using tree-sitter.
 
@@ -97,8 +98,10 @@ def analyze(
     """
     from split_pr.analyzer import enrich_hunks
 
+    skip_patterns = tuple(p.strip() for p in bulk.split(",") if p.strip()) if bulk else ()
+
     hunks_data = json.loads(hunks_file.read_text())
-    enriched = enrich_hunks(hunks_data, str(source_dir))
+    enriched = enrich_hunks(hunks_data, str(source_dir), skip_patterns=skip_patterns)
 
     out = output_file or hunks_file
     out.write_text(json.dumps(enriched, indent=2))

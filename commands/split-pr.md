@@ -96,6 +96,7 @@ Parse the user's input after `/split-pr` for these optional flags:
 | `--dag` | off | Use DAG-based branching (parallel review, but PRs may not pass tests individually) |
 | `--name <label>` | branch name (truncated to 20 chars) | Short label for PR title prefix |
 | `--pr <number>` | none | Analyze an existing PR instead of current branch |
+| `--bulk <paths>` | none | Comma-separated path patterns for vendored/bulk code (skips AST analysis) |
 
 ## Flow
 
@@ -136,6 +137,8 @@ split-pr-tools parse-diff $RUN/diff.txt > $RUN/hunks.json
 ```bash
 split-pr-tools analyze $RUN/hunks.json <repo_dir>
 ```
+
+If `--bulk` was passed, add it: `split-pr-tools analyze $RUN/hunks.json <repo_dir> --bulk "<paths>"`
 
 The `analyze` command enriches hunks with AST analysis using tree-sitter:
 - Splits large new-file hunks into per-declaration virtual hunks
