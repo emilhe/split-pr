@@ -124,6 +124,75 @@ def analyze(
         typer.echo(f"Added scope info to {scoped} hunks")
 
 
+@app.command(name="bundle-context")
+def bundle_context(
+    hunks_file: Path = typer.Argument(..., help="Path to hunks JSON"),
+    source_dir: Path = typer.Argument(..., help="Path to the repo root"),
+    output_file: Path = typer.Argument(None, help="Output file (default: stdout)"),
+    max_lines: int = typer.Option(200, "--max-lines", help="Max lines per file (0 = unlimited)"),
+) -> None:
+    """Bundle source files for all changed files into one readable file.
+
+    Produces a single file with all source files concatenated, clearly
+    delimited. The discovery agent reads this once instead of making
+    50+ individual file reads.
+
+    Only includes files that have hunks in the diff. For large files,
+    truncates to --max-lines (showing the start, which has imports and
+    key declarations).
+    """
+    data = json.loads(hunks_file.read_text())
+    parts: list[str] = []
+    file_count = 0
+
+    for file_info in data["files"]:
+        path = file_info.get("path", "")
+        full_path = source_dir / path
+        if not full_path.exists():
+            parts.append(f"=== {path} === (file not found)\n")
+            continue
+
+        try:
+            content = full_path.read_text()
+        except Exception:
+            parts.append(f"=== {path} === (read error)\n")
+            continue
+
+        lines = content.splitlines()
+        total = len(lines)
+        is_new = file_info.get("is_new", False)
+        hunk_count = len(file_info.get("hunks", []))
+
+        hunk_ids = [h["id"] for h in file_info.get("hunks", [])]
+        hunk_attr = " ".join(hunk_ids[:5])
+        if len(hunk_ids) > 5:
+            hunk_attr += f" (+{len(hunk_ids)-5} more)"
+
+        attrs = f'path="{path}" lines="{total}" hunks="{hunk_count}" hunk_ids="{hunk_attr}"'
+        if is_new:
+            attrs += ' status="NEW"'
+
+        if max_lines > 0 and total > max_lines:
+            truncated = lines[:max_lines]
+            parts.append(f"<file {attrs}>")
+            parts.append("\n".join(truncated))
+            parts.append(f"... ({total - max_lines} more lines truncated)")
+            parts.append("</file>")
+        else:
+            parts.append(f"<file {attrs}>")
+            parts.append(content.rstrip())
+            parts.append("</file>")
+        file_count += 1
+
+    result = "\n".join(parts)
+
+    if output_file:
+        output_file.write_text(result)
+        typer.echo(f"Bundled {file_count} files to {output_file}")
+    else:
+        typer.echo(result)
+
+
 @app.command()
 def stats(
     hunks_file: Path = typer.Argument(..., help="Path to hunks JSON from parse-diff"),

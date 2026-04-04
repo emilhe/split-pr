@@ -102,14 +102,24 @@ split-pr-tools list-hunks $RUN/hunks.json
 This outputs every file with its hunk IDs, sizes, and NEW/MOD/DEL flags —
 everything you need for topic assignment. Do NOT parse the JSON yourself.
 
-For each file with changes, also read the actual source file in the working
-directory to understand context:
-- What module/component does this file belong to?
-- What is the purpose of the changed code?
-- What other files does it interact with?
+Read the bundled source context (all changed files in one file):
 
-Don't read every file exhaustively — focus on understanding enough to classify
-each hunk.
+```bash
+cat $RUN/context.txt
+```
+
+This contains all changed files with clear `=== path ===` delimiters.
+Use this for understanding context — do NOT read individual source files
+unless the bundle is insufficient for a specific ambiguous case.
+
+Each hunk in the analyzed hunks.json also has embedded metadata:
+- `scope`: which function/class the hunk is inside
+- `signature`: the function/class signature line
+- `symbols_referenced`: identifiers used (hints at which feature)
+- `imports`: module imports in the region
+
+Between the bundle and the hunk metadata, you should have enough context
+to classify most hunks without additional file reads.
 
 ### Step 3: Identify generated/vendor code
 

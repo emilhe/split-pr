@@ -149,6 +149,12 @@ The `analyze` command enriches hunks with AST analysis using tree-sitter:
 split-pr-tools stats $RUN/hunks.json
 ```
 
+Bundle all source files for the discovery agent (one read instead of 50+):
+
+```bash
+split-pr-tools bundle-context $RUN/hunks.json <repo_dir> $RUN/context.txt
+```
+
 Report the summary to the user. If total size is under the threshold, tell
 the user the PR is already small enough and stop (unless they insist).
 
