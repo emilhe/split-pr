@@ -332,10 +332,12 @@ If you find hunks that resist clean classification:
 Write the output to `$RUN/discovery.json`, then validate it:
 
 ```bash
-split-pr-tools validate-discovery $RUN/hunks.json $RUN/discovery.json
+split-pr-tools validate-discovery $RUN/hunks.json $RUN/discovery.json --fix
 ```
 
-This checks all hunks are assigned, no cycles exist, and prints per-topic
+The `--fix` flag computes `estimated_size` per topic from actual hunk data,
+builds the `assignments` dict from `hunk_ids`, and writes the corrected
+discovery back. This checks all hunks are assigned, no cycles exist, and prints per-topic
 stats with dependency info. If it reports INVALID, fix the issues and re-run.
 
 Report the validation summary: number of topics, independent groups, any

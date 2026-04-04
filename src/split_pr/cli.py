@@ -700,21 +700,40 @@ def check_sizes(
 def validate_discovery(
     hunks_file: Path = typer.Argument(..., help="Path to hunks JSON"),
     discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
+    fix: bool = typer.Option(False, "--fix", help="Fix discovery: compute sizes, build assignments, write back"),
 ) -> None:
-    """Validate discovery output: check assignments, cycles, and topic stats."""
+    """Validate discovery output: check assignments, cycles, and topic stats.
+
+    With --fix: computes estimated_size per topic from actual hunk data,
+    builds the assignments dict from hunk_ids, and writes discovery back.
+    """
     hunks_data = json.loads(hunks_file.read_text())
     discovery = json.loads(discovery_file.read_text())
 
-    # Collect all hunk IDs from the diff
+    # Collect all hunk IDs and sizes from the diff
     all_hunk_ids = set()
     hunk_file_map: dict[str, str] = {}
+    hunk_sizes: dict[str, int] = {}
     for file_info in hunks_data["files"]:
         for h in file_info["hunks"]:
             all_hunk_ids.add(h["id"])
-            hunk_file_map[h["id"]] = h["file_path"]
+            hunk_file_map[h["id"]] = h.get("file_path", file_info.get("path", "?"))
+            hunk_sizes[h["id"]] = h.get("added_lines", 0) + h.get("removed_lines", 0)
 
-    assignments = _get_assignments(discovery)
+    assignments = _get_assignments(discovery, hunks_data)
     assigned_ids = set(assignments.keys())
+
+    # Compute and update estimated_size per topic
+    if "dag" in discovery and "topics" in discovery["dag"]:
+        for tid, topic in discovery["dag"]["topics"].items():
+            topic_hunks = [hid for hid, t in assignments.items() if t == tid]
+            topic["estimated_size"] = sum(hunk_sizes.get(h, 0) for h in topic_hunks)
+
+    if fix:
+        # Write back assignments and updated sizes
+        discovery["assignments"] = assignments
+        discovery_file.write_text(json.dumps(discovery, indent=2))
+        typer.echo("Fixed: computed sizes and built assignments dict")
 
     # Coverage check
     missing = all_hunk_ids - assigned_ids
@@ -748,13 +767,13 @@ def validate_discovery(
     # Per-topic stats
     typer.echo("\nTopic hunk counts:")
     for tid in order:
-        topic = dag.topics[tid]
         topic_hunks = [hid for hid, t in assignments.items() if t == tid]
+        size = sum(hunk_sizes.get(h, 0) for h in topic_hunks)
         files = len({hunk_file_map[hid] for hid in topic_hunks if hid in hunk_file_map})
         deps = dag.get_dependencies(tid)
         dep_str = f" (depends on: {', '.join(deps)})" if deps else ""
         typer.echo(
-            f"  {tid}: {len(topic_hunks)} hunks, ~{topic.estimated_size} lines, "
+            f"  {tid}: {len(topic_hunks)} hunks, {size} lines, "
             f"{files} files{dep_str}"
         )
 
