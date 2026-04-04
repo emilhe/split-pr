@@ -199,6 +199,13 @@ def show_hunks(
                 f"{h['id']} {h['file_path']:50} "
                 f"+{h['added_lines']}/-{h['removed_lines']} = {total}{section}"
             )
+            # Show enriched metadata if present
+            if h.get("signature"):
+                sig = h["signature"] if isinstance(h["signature"], str) else h["signature"][0]
+                typer.echo(f"  sig: {sig[:120]}")
+            if h.get("symbols_referenced"):
+                refs = h["symbols_referenced"][:10]
+                typer.echo(f"  refs: {', '.join(refs)}")
             if preview > 0 and h.get("content"):
                 lines = h["content"].split("\n")[:preview]
                 for line in lines:

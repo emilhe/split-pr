@@ -90,6 +90,7 @@ class Declaration:
     start_line: int  # 1-indexed
     end_line: int  # 1-indexed, inclusive
     source: str  # the raw source text of this declaration
+    signature: str = ""  # first line of the declaration
 
     @property
     def size(self) -> int:
@@ -165,6 +166,34 @@ def _get_declaration_name(node: "Node") -> str:
     return ""
 
 
+def _get_signature(node: "Node") -> str:
+    """Extract the first line (signature) of a declaration."""
+    text = node.text.decode()
+    first_line = text.split("\n")[0].rstrip()
+    # Trim very long signatures
+    if len(first_line) > 200:
+        first_line = first_line[:200] + "..."
+    return first_line
+
+
+def _extract_imports(node: "Node") -> list[str]:
+    """Extract import source modules from a tree-sitter root node."""
+    imports: list[str] = []
+    for child in node.children:
+        if child.type == "import_statement":
+            # Python: import X or from X import Y
+            text = child.text.decode().strip()
+            imports.append(text)
+        elif child.type == "import_from_statement":
+            text = child.text.decode().strip()
+            imports.append(text)
+        elif child.type in ("import_declaration", "import_statement"):
+            # TypeScript/JavaScript
+            text = child.text.decode().strip()
+            imports.append(text)
+    return imports
+
+
 def _extract_identifiers(node: "Node", identifiers: set[str]) -> None:
     """Recursively extract all identifier names from a node."""
     if node.type == "identifier":
@@ -213,6 +242,7 @@ def parse_declarations(source: str, ext: str) -> list[Declaration]:
             start_line=child.start_point[0] + 1,
             end_line=child.end_point[0] + 1,
             source=child.text.decode(),
+            signature=_get_signature(child),
         ))
 
     return declarations
@@ -327,21 +357,26 @@ def split_new_file_hunk(
         raw = f"{file_path}:{region_name}:{start_line}:{end_line}"
         virtual_id = hashlib.sha256(raw.encode()).hexdigest()[:12]
 
-        # Analyze symbols in this region
+        # Analyze symbols and extract signature/imports for this region
         region_text = "\n".join(region_source)
         lang = _load_language(ext)
         symbols_defined: list[str] = []
         symbols_referenced: list[str] = []
+        signature = ""
+        imports: list[str] = []
         if lang:
             parser = Parser(lang)
             tree = parser.parse(region_text.encode())
             identifiers: set[str] = set()
             _extract_identifiers(tree.root_node, identifiers)
+            imports = _extract_imports(tree.root_node)
             # Declarations in this region
             region_decls = parse_declarations(region_text, ext)
             defined = {d.name for d in region_decls}
             symbols_defined = sorted(defined)
             symbols_referenced = sorted(identifiers - defined)
+            if region_decls:
+                signature = region_decls[0].signature
 
         virtual_hunks.append({
             "id": virtual_id,
@@ -357,6 +392,8 @@ def split_new_file_hunk(
             "scope": [region_name],
             "symbols_defined": symbols_defined,
             "symbols_referenced": symbols_referenced,
+            "signature": signature,
+            "imports": imports,
             "is_virtual": True,
             "original_hunk_id": hunk_id,
         })
@@ -549,6 +586,20 @@ def enrich_hunks(hunks_data: dict, source_dir: str | None = None,
                         if d.start_line <= hunk_end and d.end_line >= hunk_start:
                             scope.append(d.name)
                     hunk["scope"] = scope
+
+                    # Add signatures for the declarations this hunk overlaps
+                    sigs = [d.signature for d in decls
+                            if d.start_line <= hunk_end and d.end_line >= hunk_start
+                            and d.signature]
+                    if sigs:
+                        hunk["signature"] = sigs[0] if len(sigs) == 1 else sigs
+
+                    # Add file-level imports
+                    lang = _load_language(ext)
+                    if lang:
+                        parser = Parser(lang)
+                        tree = parser.parse(source_text.encode())
+                        hunk["imports"] = _extract_imports(tree.root_node)
 
                     # If hunk spans multiple declarations, try to split it
                     if len(scope) >= 2:
