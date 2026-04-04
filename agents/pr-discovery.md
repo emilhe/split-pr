@@ -96,11 +96,17 @@ any commit-level grouping.
 Get the full file listing with hunk IDs using the CLI:
 
 ```bash
-split-pr-tools list-hunks $RUN/hunks.json
+split-pr-tools list-hunks $RUN/hunks.json --detail
 ```
 
-This outputs every file with its hunk IDs, sizes, and NEW/MOD/DEL flags —
-everything you need for topic assignment. Do NOT parse the JSON yourself.
+This outputs every file with hunk IDs, sizes, scopes, and signatures.
+
+**CRITICAL: The hunk IDs shown by `list-hunks` are the ONLY valid IDs.**
+The hunks.json may contain virtual IDs (from AST splitting of large files
+like adapter.py into per-function hunks). These virtual IDs are different
+from raw diff IDs. When writing discovery.json, use ONLY the IDs from
+`list-hunks` output. Do NOT get IDs from `parse-diff`, `git diff`, or
+any other source — those will be the wrong IDs.
 
 Read the bundled source context (all changed files in one file):
 

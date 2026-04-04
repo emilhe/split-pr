@@ -173,6 +173,7 @@ Pass it:
 - The size threshold (lines)
 - The max files threshold
 - The working directory (so it can read source files for context)
+- If `--bulk` was passed, tell the agent which paths are bulk
 
 **Do NOT include your own analysis of the diff, suggested topic boundaries,
 or commentary about how files should be grouped.** The discovery agent has
