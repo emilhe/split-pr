@@ -720,20 +720,27 @@ def validate_discovery(
             hunk_file_map[h["id"]] = h.get("file_path", file_info.get("path", "?"))
             hunk_sizes[h["id"]] = h.get("added_lines", 0) + h.get("removed_lines", 0)
 
-    assignments = _get_assignments(discovery, hunks_data)
-    assigned_ids = set(assignments.keys())
-
-    # Compute and update estimated_size per topic
-    if "dag" in discovery and "topics" in discovery["dag"]:
-        for tid, topic in discovery["dag"]["topics"].items():
-            topic_hunks = [hid for hid, t in assignments.items() if t == tid]
-            topic["estimated_size"] = sum(hunk_sizes.get(h, 0) for h in topic_hunks)
-
     if fix:
-        # Write back assignments and updated sizes
-        discovery["assignments"] = assignments
+        # Build assignments directly from hunk_ids (no virtual→raw resolution)
+        # This keeps assignments consistent with hunk_ids in topics.
+        # Virtual→raw resolution happens later in build-plan.
+        fixed_assignments: dict[str, str] = {}
+        if "dag" in discovery and "topics" in discovery["dag"]:
+            for tid, topic in discovery["dag"]["topics"].items():
+                for hid in topic.get("hunk_ids", []):
+                    fixed_assignments[hid] = tid
+                # Compute estimated_size from actual hunk data
+                topic["estimated_size"] = sum(
+                    hunk_sizes.get(h, 0) for h in topic.get("hunk_ids", [])
+                )
+        discovery["assignments"] = fixed_assignments
         discovery_file.write_text(json.dumps(discovery, indent=2))
-        typer.echo("Fixed: computed sizes and built assignments dict")
+        typer.echo(f"Fixed: {len(fixed_assignments)} assignments, sizes computed")
+        assignments = fixed_assignments
+    else:
+        assignments = _get_assignments(discovery, hunks_data)
+
+    assigned_ids = set(assignments.keys())
 
     # Coverage check
     missing = all_hunk_ids - assigned_ids
