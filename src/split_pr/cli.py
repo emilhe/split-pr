@@ -219,17 +219,27 @@ def list_hunks(
     hunks_file: Path = typer.Argument(..., help="Path to hunks JSON from parse-diff"),
     detail: bool = typer.Option(False, "--detail", "-d", help="Show scope, signature, and refs per hunk"),
     skip: str = typer.Option("", "--skip", help="Comma-separated path patterns to exclude"),
+    only: str = typer.Option("", "--only", help="Only show files matching these path patterns"),
+    summary: bool = typer.Option(False, "--summary", "-s", help="Show totals at the end"),
 ) -> None:
     """List all files with their hunk IDs, sizes, and flags.
 
     Use --detail to include scope, signature, and symbol references per hunk.
-    Use --skip to exclude paths (e.g., vendored code).
+    Use --skip to exclude paths. Use --only to show only matching paths.
+    Use --summary for totals.
     """
     data = json.loads(hunks_file.read_text())
     skip_patterns = tuple(p.strip() for p in skip.split(",") if p.strip()) if skip else ()
+    only_patterns = tuple(p.strip() for p in only.split(",") if p.strip()) if only else ()
+
+    total_files = 0
+    total_hunks = 0
+    total_lines = 0
 
     for f in data["files"]:
         if skip_patterns and any(p in f["path"] for p in skip_patterns):
+            continue
+        if only_patterns and not any(p in f["path"] for p in only_patterns):
             continue
 
         if f["is_new"]:
@@ -238,6 +248,10 @@ def list_hunks(
             marker = "DEL"
         else:
             marker = "MOD"
+
+        total_files += 1
+        total_hunks += len(f["hunks"])
+        total_lines += f["total_size"]
 
         if not detail:
             hunk_ids = [h["id"] for h in f["hunks"]]
@@ -254,6 +268,9 @@ def list_hunks(
                 scope_str = f"  scope={scope}" if scope else ""
                 sig_str = f"  sig={sig[:80]}" if sig else ""
                 typer.echo(f"    {h['id']}  size={size}{scope_str}{sig_str}")
+
+    if summary:
+        typer.echo(f"\nTotal: {total_files} files, {total_hunks} hunks, {total_lines} lines")
 
 
 @app.command(name="show-hunks")
