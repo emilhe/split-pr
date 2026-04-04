@@ -181,8 +181,17 @@ Guidelines for classification:
      functions it uses from shared/adapter/bridge files.
   3. Assign each used function's virtual hunk to the same topic as its consumer.
   4. Functions used by multiple consumers → shared infrastructure topic.
-  5. Functions used by no consumer in this diff → assign to the topic whose
-     purpose they most closely match (check the function name and body).
+  5. Functions used by no consumer in this diff → group by feature domain
+     and create a topic for each domain. Do NOT lump all unreferenced
+     functions into one catch-all topic. Determine feature domain from
+     function names, the module/subpackage they serve, or the business
+     logic in their bodies. For example, 14 functions named
+     `get_forecast_*`, `save_cube_data_*`, etc. form a "forecast adapter"
+     topic, even if no forecast route exists in this diff. A separate set
+     named `clone_brand_*`, `trim_cube_*` would form a different topic.
+     Shared utilities (auth bridges, compatibility wrappers) used across
+     domains go to a shared infrastructure topic, not lumped with one
+     feature's functions.
 
   Do this BEFORE finalizing topics — classification of multi-function files
   depends on knowing who consumes each function. If you classify adapter.py
@@ -205,6 +214,17 @@ Guidelines for classification:
   "scripts" or "tooling" bucket. `scripts/get_token.py` goes with auth,
   `scripts/test_connection.py` goes with database infrastructure,
   `scripts/test_endpoints.py` goes with the endpoints it tests.
+- **Caller-side adaptations follow their feature, not the dependency**:
+  when an existing file changes only to adapt to a dependency's new
+  interface (e.g., adding `.to_dict()` because `fetch_data` now returns
+  a DataFrame instead of a list), assign the change to the caller's
+  feature topic, not the dependency's infrastructure topic. The
+  infrastructure topic introduces the interface change; each downstream
+  caller adapts in its own feature's PR. Example: `review/service.py`
+  (forecast) adds `.to_dict("records")` after `database/core.py` changes
+  `fetch_data`'s return type → the service change belongs to "forecast",
+  not "database-core." This mirrors the "tests follow their subject"
+  rule: the change is *about* the feature, not the infrastructure.
 - **NEVER create catch-all topics**: Topics like "misc", "docs-and-tooling",
   "cleanup", "various fixes", or "other changes" are forbidden. Every hunk
   must be assigned based on its semantic purpose. If a file doesn't clearly
