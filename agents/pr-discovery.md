@@ -80,13 +80,16 @@ appear in the PR description to help reviewers navigate the change.
 ### Step 1: Use commit history as initial hypotheses
 
 Run `git log --oneline <base>...HEAD` to see how the author organized
-their work. Commit messages are the strongest signal for topic boundaries —
-the author already grouped changes into logical units. Use these as your
-starting hypotheses for topics, then validate and refine based on hunk
-analysis.
+their work. Commit messages are a useful **starting hypothesis** for topic
+boundaries, but they are NOT authoritative — authors routinely group
+unrelated work into a single commit, or spread one logical change across
+several.
 
-Don't blindly trust commit boundaries (commits may mix topics), but don't
-ignore them either. If a commit is clearly one topic, keep it together.
+Use commits as initial guesses, then **always validate and refine** in
+Steps 2–4 based on hunk analysis. In particular, a single commit that
+touches a multi-function file (adapter, routes, config) often contains
+multiple topics — the per-function splitting rules in Step 4 override
+any commit-level grouping.
 
 ### Step 2: Read and understand the hunks
 
@@ -170,6 +173,24 @@ Guidelines for classification:
   - **Route files** registering multiple endpoints
   - **Config files** with settings for different subsystems
   - **`__init__.py` exports** grouping unrelated public APIs
+
+  **How to determine which topic a function belongs to — import tracing:**
+  1. First identify the "leaf" files — endpoint routes, feature modules,
+     CLI commands. These are the consumers. Group them into candidate topics.
+  2. For each consumer file, read its imports and function calls to see which
+     functions it uses from shared/adapter/bridge files.
+  3. Assign each used function's virtual hunk to the same topic as its consumer.
+  4. Functions used by multiple consumers → shared infrastructure topic.
+  5. Functions used by no consumer in this diff → assign to the topic whose
+     purpose they most closely match (check the function name and body).
+
+  Do this BEFORE finalizing topics — classification of multi-function files
+  depends on knowing who consumes each function. If you classify adapter.py
+  as one topic first and check consumers later, you'll miss the split.
+
+  **Preamble hunks** (imports at the top of a multi-function file) are shared
+  infrastructure for that file. Assign them to the earliest topic in the
+  dependency order that uses the file — downstream topics will inherit them.
 - **Shared infrastructure**: if code serves multiple topics (utilities, types,
   config), make it a separate topic marked `is_shared: true`. This becomes a
   foundational PR that others depend on.
@@ -203,8 +224,13 @@ Some changes must stay as one topic even if they're large:
   regeneration — keep with the change that triggered them.
 - **Dependency updates**: `go.mod` + `vendor/`, `package.json` +
   `package-lock.json`, `pyproject.toml` + `uv.lock` are one unit.
-- **Tightly coupled changes**: if changes don't make sense independently
-  or would break the build when separated, they're one topic.
+- **Tightly coupled changes**: if separating changes would cause **build
+  failures or type errors** (not just shared imports), they're one topic.
+  "Same file", "same pattern", or "shared preamble imports" are NOT
+  evidence of tight coupling — those are exactly the cases where the
+  per-function virtual hunks exist to enable splitting. Tight coupling
+  means function A calls function B's internals, or they modify the same
+  data structure in coordinated ways.
 - **Bulk imports / vendored copies / shims**: many new files that are
   verbatim (or near-verbatim) copies from another repo or codebase.
   Common patterns: directories named `_legacy/`, `_shims/`, `vendor/`,
