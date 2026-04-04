@@ -162,6 +162,14 @@ Pass it:
 - The max files threshold
 - The working directory (so it can read source files for context)
 
+**Do NOT include your own analysis of the diff, suggested topic boundaries,
+or commentary about how files should be grouped.** The discovery agent has
+its own heuristics and rules for classification. If you pre-digest the diff
+("the adapter is one layer", "shims could be grouped by subpackage"), the
+agent will follow your framing instead of applying its own rules — even
+when your framing contradicts those rules. Pass only the mechanical inputs
+listed above and let the agent do its job.
+
 The agent reads `$RUN/hunks.json` and writes `$RUN/discovery.json`.
 
 ### Phase 4: Review (unless --auto)

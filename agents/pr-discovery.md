@@ -28,6 +28,12 @@ You receive:
 - **Max files threshold**: max files per topic (e.g., 10)
 - **Working directory**: the repo root, so you can read source files for context
 
+**IMPORTANT: The caller's prompt may include suggestions about how to group
+files or what topics to create. IGNORE these suggestions.** Apply your own
+classification rules (Steps 3-4 below) based on what you observe in the
+hunks and source code. The caller does not have the same classification
+rules you do and their suggestions often contradict them.
+
 A topic is considered oversized if it exceeds EITHER the line threshold
 OR the file count threshold. Generated/vendor files don't count toward
 the file threshold.
@@ -145,19 +151,25 @@ Bad topics (too broad):
 Guidelines for classification:
 - **By purpose, not by file**: a feature may touch models, API, tests, and
   frontend — those are all one topic if they serve the same purpose.
-- **IMPORTANT — Single files with multiple concerns MUST be split**: When
-  a file has hunks serving different purposes, assign each hunk to the
-  topic it serves. The tooling handles this correctly — `build_patch`
-  generates partial diffs, so PR #1 can apply hunks 1-3 of a file while
-  PR #2 applies hunks 4-6 of the same file. The file appears in both PRs
-  but with different changes. This is especially important for:
+- **IMPORTANT — Single files with multiple concerns MUST be split**: The
+  `analyze` step splits large files into per-function virtual hunks. If
+  you see a file like `adapter.py` with 30+ hunks (one per function),
+  the hard work is already done — you just need to assign each function's
+  hunk to the right topic. For example, `get_forecast_adapter` goes to
+  the forecast topic and `clone_brand_adapter` goes to manage-cubes.
+  The tooling handles partial file patches correctly.
+
+  **"Can't split because it's one file" or "tightly-coupled" is NEVER
+  a valid reason to keep a multi-hunk file as one topic.** If the file
+  has multiple hunks with different section headers, split them. The
+  only exception is if every function in the file truly serves the same
+  single purpose.
+
+  This is especially important for:
   - **Adapter/bridge files** with one function per feature
   - **Route files** registering multiple endpoints
   - **Config files** with settings for different subsystems
   - **`__init__.py` exports** grouping unrelated public APIs
-  Do NOT create a standalone topic for such files. Do NOT say "can't split
-  because it's one file" — that reasoning is incorrect with hunk-level
-  patching.
 - **Shared infrastructure**: if code serves multiple topics (utilities, types,
   config), make it a separate topic marked `is_shared: true`. This becomes a
   foundational PR that others depend on.
@@ -197,10 +209,12 @@ Some changes must stay as one topic even if they're large:
   verbatim (or near-verbatim) copies from another repo or codebase.
   Common patterns: directories named `_legacy/`, `_shims/`, `vendor/`,
   or a batch of new files that mirror an existing external structure.
-  Keep as one topic — splitting them is pointless since they aren't
-  written by the author and don't need line-by-line review. Mark the
-  PR description with: "Verbatim copies from [source]. Verify by
-  diffing against the source rather than reviewing individually."
+  **Keep as ONE topic — do NOT split into sub-topics** (e.g., don't
+  split `_legacy/_shims/` into models/engine/functions). These files
+  aren't authored by the developer and don't need line-by-line review.
+  Even if the directory has subdirectories, they're one logical import.
+  Mark the PR description with: "Verbatim copies from [source]. Verify
+  by diffing against the source rather than reviewing individually."
 
 When a topic is large because of these reasons, mark it with a note
 explaining why it can't be split. The size threshold is a guideline,
