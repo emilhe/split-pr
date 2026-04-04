@@ -130,6 +130,7 @@ def bundle_context(
     source_dir: Path = typer.Argument(..., help="Path to the repo root"),
     output_file: Path = typer.Argument(None, help="Output file (default: stdout)"),
     max_lines: int = typer.Option(200, "--max-lines", help="Max lines per file (0 = unlimited)"),
+    skip: str = typer.Option("", "--skip", help="Comma-separated path patterns to exclude (e.g., vendored code)"),
 ) -> None:
     """Bundle source files for all changed files into one readable file.
 
@@ -145,11 +146,16 @@ def bundle_context(
     parts: list[str] = []
     file_count = 0
 
+    skip_patterns = tuple(p.strip() for p in skip.split(",") if p.strip()) if skip else ()
+
     for file_info in data["files"]:
         path = file_info.get("path", "")
+
+        if skip_patterns and any(p in path for p in skip_patterns):
+            continue
+
         full_path = source_dir / path
         if not full_path.exists():
-            parts.append(f"=== {path} === (file not found)\n")
             continue
 
         try:

@@ -155,6 +155,9 @@ Bundle all source files for the discovery agent (one read instead of 50+):
 split-pr-tools bundle-context $RUN/hunks.json <repo_dir> $RUN/context.txt
 ```
 
+If `--bulk` was passed, also skip those paths in the bundle:
+`split-pr-tools bundle-context $RUN/hunks.json <repo_dir> $RUN/context.txt --skip "<paths>"`
+
 Report the summary to the user. If total size is under the threshold, tell
 the user the PR is already small enough and stop (unless they insist).
 
