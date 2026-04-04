@@ -24,26 +24,50 @@ from split_pr.state import SplitPlanner
 app = typer.Typer(help="Split-PR tools — called by the split-pr skill and agents.")
 
 
-def _get_assignments(discovery: dict) -> dict[str, str]:
+def _get_assignments(discovery: dict, hunks_data: dict | None = None) -> dict[str, str]:
     """Get hunk-to-topic assignments, deriving from hunk_ids if needed.
 
     The discovery agent may write assignments as either:
     - Top-level "assignments" dict: {"hunk_id": "topic_id", ...}
     - Per-topic "hunk_ids" lists in dag.topics
 
-    This function normalizes to the flat dict format.
+    If hunks_data is provided, resolves virtual hunk IDs (from tree-sitter
+    analysis) back to their original raw diff hunk IDs via the
+    original_hunk_id field.
     """
     if "assignments" in discovery and discovery["assignments"]:
-        return discovery["assignments"]
+        raw = discovery["assignments"]
+    else:
+        # Derive from hunk_ids in topics
+        raw: dict[str, str] = {}
+        if "dag" in discovery and "topics" in discovery["dag"]:
+            for topic_id, topic in discovery["dag"]["topics"].items():
+                for hunk_id in topic.get("hunk_ids", []):
+                    raw[hunk_id] = topic_id
 
-    # Derive from hunk_ids in topics
-    assignments: dict[str, str] = {}
-    if "dag" in discovery and "topics" in discovery["dag"]:
-        for topic_id, topic in discovery["dag"]["topics"].items():
-            for hunk_id in topic.get("hunk_ids", []):
-                assignments[hunk_id] = topic_id
+    if not hunks_data:
+        return raw
 
-    return assignments
+    # Build virtual-to-raw ID mapping from the analyzed hunks
+    virtual_to_raw: dict[str, str] = {}
+    for file_info in hunks_data.get("files", []):
+        for h in file_info.get("hunks", []):
+            original = h.get("original_hunk_id")
+            if original:
+                virtual_to_raw[h["id"]] = original
+
+    if not virtual_to_raw:
+        return raw
+
+    # Resolve virtual IDs to raw IDs (multiple virtual hunks may map
+    # to the same raw hunk — deduplicate by keeping the first assignment)
+    resolved: dict[str, str] = {}
+    for hunk_id, topic_id in raw.items():
+        raw_id = virtual_to_raw.get(hunk_id, hunk_id)
+        if raw_id not in resolved:
+            resolved[raw_id] = topic_id
+
+    return resolved
 
 
 @app.command(name="parse-diff")
@@ -240,14 +264,16 @@ def build_plan(
     discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
     base: str = typer.Argument("main", help="Base branch name"),
     threshold: int = typer.Argument(400, help="Max lines per split PR"),
+    hunks_file: Path = typer.Option(None, "--hunks", help="Analyzed hunks JSON (for virtual ID resolution)"),
 ) -> None:
     """Build a split plan from a diff and discovery output."""
     parsed = parse_diff(diff_file.read_text())
     discovery = json.loads(discovery_file.read_text())
+    hunks_data = json.loads(hunks_file.read_text()) if hunks_file else None
     dag = TopicDAG.from_dict(discovery["dag"])
 
     planner = SplitPlanner(parsed, dag, base_branch=base, size_threshold=threshold)
-    planner.assign_hunks(_get_assignments(discovery))
+    planner.assign_hunks(_get_assignments(discovery, hunks_data))
     plan = planner.build_plan()
     typer.echo(planner.plan_to_json(plan))
 

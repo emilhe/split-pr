@@ -196,7 +196,7 @@ If `--auto`, skip this phase entirely.
 ### Phase 5: Build the split plan
 
 ```bash
-split-pr-tools build-plan $RUN/diff.txt $RUN/discovery.json <base> <threshold> > $RUN/plan.json
+split-pr-tools build-plan $RUN/diff.txt $RUN/discovery.json <base> <threshold> --hunks $RUN/hunks.json > $RUN/plan.json
 ```
 
 Then verify the split is lossless — all hunks accounted for, none duplicated:
