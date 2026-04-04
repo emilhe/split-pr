@@ -217,25 +217,43 @@ def stats(
 @app.command(name="list-hunks")
 def list_hunks(
     hunks_file: Path = typer.Argument(..., help="Path to hunks JSON from parse-diff"),
+    detail: bool = typer.Option(False, "--detail", "-d", help="Show scope, signature, and refs per hunk"),
+    skip: str = typer.Option("", "--skip", help="Comma-separated path patterns to exclude"),
 ) -> None:
     """List all files with their hunk IDs, sizes, and flags.
 
-    Output format per line: NEW|MOD|DEL  <size>  <path>  [<hunk_count> hunks: <id1>,<id2>,...]
-    This gives agents everything needed for topic assignment.
+    Use --detail to include scope, signature, and symbol references per hunk.
+    Use --skip to exclude paths (e.g., vendored code).
     """
     data = json.loads(hunks_file.read_text())
+    skip_patterns = tuple(p.strip() for p in skip.split(",") if p.strip()) if skip else ()
+
     for f in data["files"]:
+        if skip_patterns and any(p in f["path"] for p in skip_patterns):
+            continue
+
         if f["is_new"]:
             marker = "NEW"
         elif f["is_deleted"]:
             marker = "DEL"
         else:
             marker = "MOD"
-        hunk_ids = [h["id"] for h in f["hunks"]]
-        typer.echo(
-            f"{marker:3} {f['total_size']:5} {f['path']}  "
-            f"[{len(hunk_ids)} hunks: {','.join(hunk_ids)}]"
-        )
+
+        if not detail:
+            hunk_ids = [h["id"] for h in f["hunks"]]
+            typer.echo(
+                f"{marker:3} {f['total_size']:5} {f['path']}  "
+                f"[{len(hunk_ids)} hunks: {','.join(hunk_ids)}]"
+            )
+        else:
+            typer.echo(f"{marker:3} {f['total_size']:5} {f['path']}")
+            for h in f["hunks"]:
+                size = h.get("added_lines", 0) + h.get("removed_lines", 0)
+                scope = h.get("scope", [])
+                sig = h.get("signature", "")
+                scope_str = f"  scope={scope}" if scope else ""
+                sig_str = f"  sig={sig[:80]}" if sig else ""
+                typer.echo(f"    {h['id']}  size={size}{scope_str}{sig_str}")
 
 
 @app.command(name="show-hunks")
