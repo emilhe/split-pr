@@ -460,12 +460,14 @@ def show_discovery(
     sort: str = typer.Option("", "--sort", help="Sort topics by: size (descending)"),
     only: str = typer.Option("", "--only", help="With --topic: only show files matching these patterns"),
     skip: str = typer.Option("", "--skip", help="With --topic: exclude files matching these patterns"),
+    show_edges: bool = typer.Option(False, "--edges", "-e", help="Show all edges with constraint and reason"),
 ) -> None:
     """Show discovery state: topics, sizes, and unassigned hunks.
 
     Computes real sizes from hunk data (not estimated_size). Use --topic
     to drill into one topic's files and scopes. Use --sort size to rank
     topics by size. Use --only/--skip with --topic to filter files.
+    Use --edges to list all dependency edges with their types and reasons.
     """
     hunks_data = json.loads(hunks_file.read_text())
     discovery = json.loads(discovery_file.read_text())
@@ -484,11 +486,11 @@ def show_discovery(
     all_hunk_ids = set(hunk_info.keys())
     assigned_ids = set(assignments.keys())
 
-    # Get DAG edges for dependencies
+    # Get DAG edges for dependencies (with constraint/reason)
     edges = discovery.get("dag", {}).get("edges", [])
-    dep_map: dict[str, list[str]] = {}
+    dep_map: dict[str, list[dict]] = {}  # topic -> list of {from, constraint, reason}
     for e in edges:
-        dep_map.setdefault(e["to"], []).append(e["from"])
+        dep_map.setdefault(e["to"], []).append(e)
 
     if topic:
         # Detail view for one topic
@@ -505,8 +507,14 @@ def show_discovery(
                 files.setdefault(info["file"], []).append({"id": hid, **info})
 
         deps = dep_map.get(topic, [])
-        dep_str = f"  depends_on: {', '.join(deps)}" if deps else ""
-        typer.echo(f"{topic}: {len(topic_hunks)} hunks, {total_size} lines, {len(files)} files{dep_str}")
+        dep_parts = [f"{d['from']}({d.get('constraint','hard')[0]})" for d in deps]
+        dep_str = f"  depends_on: {', '.join(dep_parts)}" if deps else ""
+        intent = topic_data.get("intent", "")
+        intent_str = f" [{intent}]" if intent else ""
+        typer.echo(f"{topic}{intent_str}: {len(topic_hunks)} hunks, {total_size} lines, {len(files)} files{dep_str}")
+        for d in deps:
+            if d.get("reason"):
+                typer.echo(f"  edge {d['from']} -> {topic}: {d.get('constraint','hard')} — {d['reason']}")
 
         # Show topic description if available
         topic_data = discovery.get("dag", {}).get("topics", {}).get(topic, {})
@@ -561,9 +569,13 @@ def show_discovery(
             if not s:
                 continue
             deps = dep_map.get(tid, [])
-            dep_str = f"  depends: {', '.join(deps)}" if deps else ""
+            dep_parts = [f"{d['from']}({d.get('constraint','hard')[0]})" for d in deps]
+            dep_str = f"  depends: {', '.join(dep_parts)}" if deps else ""
+            topic_data_row = discovery.get("dag", {}).get("topics", {}).get(tid, {})
+            intent = topic_data_row.get("intent", "")
+            intent_str = f" [{intent}]" if intent else ""
             typer.echo(
-                f"  {tid:40} {s['hunks']:4} hunks  {s['size']:5} lines  "
+                f"  {tid:30}{intent_str:15} {s['hunks']:4} hunks  {s['size']:5} lines  "
                 f"{len(s['files']):2} files{dep_str}"
             )
 
@@ -574,6 +586,14 @@ def show_discovery(
                 if info:
                     scope_str = f"  scope={info['scope']}" if info["scope"] else ""
                     typer.echo(f"  {info['file']}{scope_str}  size={info['size']}")
+
+        if show_edges and edges:
+            typer.echo(f"\nEdges ({len(edges)}):")
+            for e in edges:
+                c = e.get("constraint", "hard")
+                r = e.get("reason", "")
+                reason_str = f" — {r}" if r else ""
+                typer.echo(f"  {e['from']} -> {e['to']}  [{c}]{reason_str}")
 
 
 @app.command(name="update-metadata")
@@ -593,6 +613,7 @@ def update_metadata(
           "forecast-adapter": {
             "name": "Forecast adapter layer",
             "description": "Bridges Pydantic models to legacy functions...",
+            "intent": "behavioral",
             "is_shared": false,
             "key_files": [
               {"path": "adapter.py", "note": "14 adapter functions"}
@@ -611,9 +632,9 @@ def update_metadata(
         if topic_id not in topics:
             skipped.append(topic_id)
             continue
-        for field in ("name", "description", "is_shared", "key_files"):
-            if field in updates:
-                topics[topic_id][field] = updates[field]
+        for field_name in ("name", "description", "is_shared", "key_files", "intent"):
+            if field_name in updates:
+                topics[topic_id][field_name] = updates[field_name]
         updated += 1
 
     discovery_file.write_text(json.dumps(discovery, indent=2))
@@ -635,7 +656,7 @@ def assign_hunks(
     remainder_topic: str = typer.Option("", "--remainder",
         help="Topic name for any unassigned hunks"),
     deps: list[str] = typer.Option([], "--dep", "-d",
-        help="Dependency edge: 'from_topic:to_topic'"),
+        help="Dependency edge: 'from:to' or 'from:to:hard|soft:reason'"),
 ) -> None:
     """Assign hunks to topics by scope name or file path — no hunk IDs needed.
 
@@ -649,7 +670,8 @@ def assign_hunks(
         --topic "database:path:database/"
         --bulk-topic "legacy-shims" --bulk-path "_legacy/_shims/"
         --remainder "misc"
-        --dep "config:database" --dep "database:caching"
+        --dep "config:database:hard:config defines DB connection settings"
+        --dep "auth:logging:soft:same observability domain"
     """
     hunks_data = json.loads(hunks_file.read_text())
 
@@ -769,12 +791,21 @@ def assign_hunks(
         if len(unassigned) > 10:
             typer.echo(f"    ... and {len(unassigned) - 10} more")
 
-    # Build edges
+    # Build edges: "from:to" or "from:to:hard|soft" or "from:to:hard|soft:reason text"
     edges = []
     for dep_spec in deps:
-        parts = dep_spec.split(":")
-        if len(parts) == 2:
-            edges.append({"from": parts[0], "to": parts[1]})
+        parts = dep_spec.split(":", 3)
+        if len(parts) >= 2:
+            edge: dict = {"from": parts[0], "to": parts[1]}
+            if len(parts) >= 3:
+                edge["constraint"] = parts[2]
+            else:
+                edge["constraint"] = "hard"
+            if len(parts) >= 4:
+                edge["reason"] = parts[3]
+            else:
+                edge["reason"] = ""
+            edges.append(edge)
 
     # Write discovery.json
     discovery = {
@@ -796,6 +827,163 @@ def assign_hunks(
         typer.echo("VALID: All hunks assigned.")
     else:
         typer.echo(f"INVALID: {unassigned_count} hunks unassigned.")
+
+
+@app.command(name="edit-edges")
+def edit_edges(
+    discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
+    add: list[str] = typer.Option([], "--add", "-a",
+        help="Add edge: 'from:to:hard|soft:reason'"),
+    remove: list[str] = typer.Option([], "--remove", "-r",
+        help="Remove edge: 'from:to'"),
+) -> None:
+    """Add or remove dependency edges in an existing discovery.json.
+
+    Use this after assign-hunks + update-metadata to adjust edges without
+    losing enriched metadata. Validates that referenced topics exist and
+    that no cycles are introduced.
+
+    Examples:
+        --add "config:database:hard:config defines DB settings"
+        --remove "auth:logging"
+    """
+    discovery = json.loads(discovery_file.read_text())
+    edges = discovery.get("dag", {}).get("edges", [])
+    topics = discovery.get("dag", {}).get("topics", {})
+
+    # Remove edges
+    removed = 0
+    for spec in remove:
+        parts = spec.split(":", 1)
+        if len(parts) != 2:
+            typer.echo(f"ERROR: invalid remove spec '{spec}' — expected 'from:to'", err=True)
+            raise typer.Exit(1)
+        from_id, to_id = parts
+        before = len(edges)
+        edges = [e for e in edges if not (e["from"] == from_id and e["to"] == to_id)]
+        if len(edges) < before:
+            removed += 1
+            typer.echo(f"  Removed: {from_id} -> {to_id}")
+        else:
+            typer.echo(f"  WARNING: edge {from_id} -> {to_id} not found")
+
+    # Add edges
+    added = 0
+    for spec in add:
+        parts = spec.split(":", 3)
+        if len(parts) < 2:
+            typer.echo(f"ERROR: invalid add spec '{spec}'", err=True)
+            raise typer.Exit(1)
+        from_id, to_id = parts[0], parts[1]
+        for tid in (from_id, to_id):
+            if tid not in topics:
+                typer.echo(f"ERROR: topic '{tid}' not found", err=True)
+                raise typer.Exit(1)
+        edge: dict = {"from": from_id, "to": to_id}
+        edge["constraint"] = parts[2] if len(parts) >= 3 else "hard"
+        edge["reason"] = parts[3] if len(parts) >= 4 else ""
+        # Check for duplicate
+        if any(e["from"] == from_id and e["to"] == to_id for e in edges):
+            typer.echo(f"  WARNING: edge {from_id} -> {to_id} already exists, replacing")
+            edges = [e for e in edges if not (e["from"] == from_id and e["to"] == to_id)]
+        edges.append(edge)
+        added += 1
+        typer.echo(f"  Added: {from_id} -> {to_id} [{edge['constraint']}]")
+
+    # Validate: rebuild DAG to check for cycles
+    discovery["dag"]["edges"] = edges
+    try:
+        TopicDAG.from_dict(discovery["dag"])
+    except Exception as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        typer.echo("Edge changes would create a cycle. Not written.", err=True)
+        raise typer.Exit(1)
+
+    discovery_file.write_text(json.dumps(discovery, indent=2))
+    typer.echo(f"\n{added} added, {removed} removed. Total edges: {len(edges)}")
+
+
+@app.command(name="merge-topics")
+def merge_topics_cmd(
+    discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
+    merge: str = typer.Argument(..., help="Comma-separated topic IDs to merge"),
+    name: str = typer.Argument(..., help="Name for the merged topic"),
+    merged_id: str = typer.Option("", "--id", help="ID for merged topic (default: slugified name)"),
+) -> None:
+    """Merge multiple topics into one in an existing discovery.json.
+
+    Combines hunk assignments, preserves external edges, drops internal
+    edges between the merged topics. Metadata (description, key_files)
+    is concatenated from the source topics.
+
+    Example:
+        split-pr-tools merge-topics $RUN/discovery.json "auth,auth-tests" "Authentication"
+    """
+    discovery = json.loads(discovery_file.read_text())
+    topic_ids = [t.strip() for t in merge.split(",")]
+
+    if len(topic_ids) < 2:
+        typer.echo("ERROR: need at least 2 topics to merge", err=True)
+        raise typer.Exit(1)
+
+    topics = discovery.get("dag", {}).get("topics", {})
+    for tid in topic_ids:
+        if tid not in topics:
+            typer.echo(f"ERROR: topic '{tid}' not found", err=True)
+            raise typer.Exit(1)
+
+    # Generate merged ID from name if not provided
+    if not merged_id:
+        merged_id = name.lower().replace(" ", "-").replace("_", "-")
+        merged_id = "".join(c for c in merged_id if c.isalnum() or c == "-").strip("-")
+
+    # Rebuild DAG, merge, serialize back
+    dag = TopicDAG.from_dict(discovery["dag"])
+    merged = dag.merge_topics(topic_ids, merged_id, name)
+
+    # Combine descriptions and key_files from source topics
+    descriptions = []
+    key_files = []
+    for tid in topic_ids:
+        src = topics[tid]
+        if src.get("description") and not src["description"].startswith("Assigned by"):
+            descriptions.append(src["description"])
+        key_files.extend(src.get("key_files", []))
+
+    # Update the merged topic in the DAG
+    merged.description = " ".join(descriptions) if descriptions else f"Merged from: {', '.join(topic_ids)}"
+
+    # Serialize back
+    dag_dict = dag.to_dict()
+
+    # Preserve key_files and intent in the serialized form
+    if key_files:
+        dag_dict["topics"][merged_id]["key_files"] = key_files
+    # Pick intent from first topic that has one
+    for tid in topic_ids:
+        intent = topics[tid].get("intent", "")
+        if intent:
+            dag_dict["topics"][merged_id]["intent"] = intent
+            break
+
+    discovery["dag"] = dag_dict
+
+    # Update assignments
+    if "assignments" in discovery:
+        for hid, tid in discovery["assignments"].items():
+            if tid in topic_ids:
+                discovery["assignments"][hid] = merged_id
+
+    discovery_file.write_text(json.dumps(discovery, indent=2))
+
+    typer.echo(f"Merged {len(topic_ids)} topics into '{merged_id}'")
+    typer.echo(f"  {merged.hunk_count} hunks, {merged.estimated_size} lines")
+    deps = dag.get_dependencies(merged_id)
+    dependents = dag.get_dependents(merged_id)
+    if deps:
+        typer.echo(f"  depends on: {', '.join(deps)}")
+    if dependents:
+        typer.echo(f"  depended on by: {', '.join(dependents)}")
 
 
 @app.command(name="show-plan")
@@ -1366,14 +1554,26 @@ def validate_discovery(
 
     # Per-topic stats
     typer.echo("\nTopic hunk counts:")
+    edge_list = discovery["dag"].get("edges", [])
+    edge_lookup: dict[tuple[str, str], dict] = {
+        (e["from"], e["to"]): e for e in edge_list
+    }
     for tid in order:
         topic_hunks = [hid for hid, t in assignments.items() if t == tid]
         size = sum(hunk_sizes.get(h, 0) for h in topic_hunks)
         files = len({hunk_file_map[hid] for hid in topic_hunks if hid in hunk_file_map})
         deps = dag.get_dependencies(tid)
-        dep_str = f" (depends on: {', '.join(deps)})" if deps else ""
+        dep_parts = []
+        for d in deps:
+            e = edge_lookup.get((d, tid), {})
+            c = e.get("constraint", "hard")
+            dep_parts.append(f"{d}({c[0]})")
+        dep_str = f" (depends on: {', '.join(dep_parts)})" if dep_parts else ""
+        topic_meta_val = discovery["dag"]["topics"].get(tid, {})
+        intent = topic_meta_val.get("intent", "")
+        intent_str = f" [{intent}]" if intent else ""
         typer.echo(
-            f"  {tid}: {len(topic_hunks)} hunks, {size} lines, "
+            f"  {tid}{intent_str}: {len(topic_hunks)} hunks, {size} lines, "
             f"{files} files{dep_str}"
         )
 
@@ -1496,15 +1696,21 @@ def render_dag(
     for tid, tdata in topics.items():
         name = tdata.get("name", tid)
         size = tdata.get("estimated_size", 0)
-        label = f"{name}<br/>{size} lines"
+        intent = tdata.get("intent", "")
+        intent_line = f"<br/><i>{intent}</i>" if intent else ""
+        label = f"{name}<br/>{size} lines{intent_line}"
         if highlight and tid == highlight:
             lines.append(f'    {tid}["{label}"]:::current')
         else:
             lines.append(f'    {tid}["{label}"]')
 
-    # Edges
+    # Edges: solid for hard, dashed for soft
     for e in edges:
-        lines.append(f"    {e['from']} --> {e['to']}")
+        constraint = e.get("constraint", "hard")
+        if constraint == "soft":
+            lines.append(f"    {e['from']} -.-> {e['to']}")
+        else:
+            lines.append(f"    {e['from']} --> {e['to']}")
 
     # Click links to PRs
     if links:
@@ -1558,17 +1764,23 @@ def render_dag_full(
     for tid, tdata in topics.items():
         name = tdata.get("name", tid)
         size = tdata.get("estimated_size", 0)
+        intent = tdata.get("intent", "")
+        intent_line = f"<br/><i>{intent}</i>" if intent else ""
         info = topic_info.get(tid)
         if info:
-            label = f"#{info['index']}/{info['total']} {name}<br/>{size} lines"
+            label = f"#{info['index']}/{info['total']} {name}<br/>{size} lines{intent_line}"
         else:
-            label = f"{name}<br/>{size} lines"
+            label = f"{name}<br/>{size} lines{intent_line}"
 
         lines.append(f'    {tid}["{label}"]')
 
-    # Edges
+    # Edges: solid for hard, dashed for soft
     for e in edges:
-        lines.append(f"    {e['from']} --> {e['to']}")
+        constraint = e.get("constraint", "hard")
+        if constraint == "soft":
+            lines.append(f"    {e['from']} -.-> {e['to']}")
+        else:
+            lines.append(f"    {e['from']} --> {e['to']}")
 
     # Find independent groups (nodes with no edges between them)
     # by checking weakly connected components
