@@ -329,6 +329,170 @@ def show_hunks(
                 typer.echo(f"{m} NOT FOUND")
 
 
+@app.command(name="assign-hunks")
+def assign_hunks(
+    hunks_file: Path = typer.Argument(..., help="Path to analyzed hunks JSON"),
+    output_file: Path = typer.Argument(..., help="Path to write discovery JSON"),
+    topics: list[str] = typer.Option([], "--topic", "-t",
+        help="Topic assignment: 'name:scope1,scope2' or 'name:path:pattern'"),
+    bulk_topic: str = typer.Option("", "--bulk-topic",
+        help="Topic name for bulk/vendored hunks (assigns all hunks matching --bulk-path)"),
+    bulk_path: str = typer.Option("", "--bulk-path",
+        help="Path pattern for bulk hunks"),
+    remainder_topic: str = typer.Option("", "--remainder",
+        help="Topic name for any unassigned hunks"),
+    deps: list[str] = typer.Option([], "--dep", "-d",
+        help="Dependency edge: 'from_topic:to_topic'"),
+) -> None:
+    """Assign hunks to topics by scope name or file path — no hunk IDs needed.
+
+    The agent works with function names and file paths. This command
+    resolves them to the correct hunk IDs internally.
+
+    Examples:
+        --topic "forecast-adapter:scope:get_versions_adapter,fill_in_otb_adapter"
+        --topic "manage-cubes:scope:clone_brand_adapter,trim_cube_adapter"
+        --topic "config:path:config.py,pyproject.toml,.gitignore"
+        --topic "database:path:database/"
+        --bulk-topic "legacy-shims" --bulk-path "_legacy/_shims/"
+        --remainder "misc"
+        --dep "config:database" --dep "database:caching"
+    """
+    hunks_data = json.loads(hunks_file.read_text())
+
+    # Build lookup structures
+    all_hunks: list[dict] = []
+    for file_info in hunks_data["files"]:
+        for h in file_info["hunks"]:
+            h["_file_path"] = file_info.get("path", h.get("file_path", ""))
+            all_hunks.append(h)
+
+    # Track assignments: hunk_id -> topic_id
+    assignments: dict[str, str] = {}
+    topic_meta: dict[str, dict] = {}  # topic_id -> {name, description, hunk_ids, ...}
+
+    # Process --bulk-topic first
+    if bulk_topic and bulk_path:
+        bulk_patterns = [p.strip() for p in bulk_path.split(",")]
+        bulk_hunk_ids = []
+        bulk_size = 0
+        bulk_files = set()
+        for h in all_hunks:
+            if any(p in h["_file_path"] for p in bulk_patterns):
+                assignments[h["id"]] = bulk_topic
+                bulk_hunk_ids.append(h["id"])
+                bulk_size += h.get("added_lines", 0) + h.get("removed_lines", 0)
+                bulk_files.add(h["_file_path"])
+        topic_meta[bulk_topic] = {
+            "id": bulk_topic, "name": f"Bulk: {bulk_path}",
+            "description": f"Vendored/bulk code from {bulk_path}",
+            "estimated_size": bulk_size, "hunk_ids": bulk_hunk_ids,
+            "is_shared": False,
+        }
+        typer.echo(f"  {bulk_topic}: {len(bulk_hunk_ids)} hunks, {bulk_size} lines, {len(bulk_files)} files")
+
+    # Process --topic assignments
+    for topic_spec in topics:
+        # Parse "name:type:values" format
+        parts = topic_spec.split(":", 2)
+        if len(parts) < 2:
+            typer.echo(f"ERROR: Invalid topic spec '{topic_spec}' — expected 'name:scope:x,y' or 'name:path:x,y'", err=True)
+            raise typer.Exit(1)
+
+        topic_name = parts[0]
+        if len(parts) == 3:
+            match_type = parts[1]  # "scope" or "path"
+            match_values = [v.strip() for v in parts[2].split(",")]
+        else:
+            # Default: try scope first, fallback to path
+            match_values = [v.strip() for v in parts[1].split(",")]
+            # Detect if these look like paths (contain / or .)
+            if any("/" in v or v.endswith(".py") or v.endswith(".ts") for v in match_values):
+                match_type = "path"
+            else:
+                match_type = "scope"
+
+        matched_ids = []
+        matched_size = 0
+        matched_files = set()
+
+        for h in all_hunks:
+            if h["id"] in assignments:
+                continue  # already assigned
+
+            if match_type == "scope":
+                scope = h.get("scope", [])
+                section = h.get("section_header", "")
+                if any(v in scope or v == section for v in match_values):
+                    assignments[h["id"]] = topic_name
+                    matched_ids.append(h["id"])
+                    matched_size += h.get("added_lines", 0) + h.get("removed_lines", 0)
+                    matched_files.add(h["_file_path"])
+            elif match_type == "path":
+                if any(v in h["_file_path"] for v in match_values):
+                    assignments[h["id"]] = topic_name
+                    matched_ids.append(h["id"])
+                    matched_size += h.get("added_lines", 0) + h.get("removed_lines", 0)
+                    matched_files.add(h["_file_path"])
+
+        topic_meta[topic_name] = {
+            "id": topic_name, "name": topic_name,
+            "description": f"Assigned by {match_type}: {','.join(match_values[:5])}",
+            "estimated_size": matched_size, "hunk_ids": matched_ids,
+            "is_shared": False,
+        }
+        typer.echo(f"  {topic_name}: {len(matched_ids)} hunks, {matched_size} lines, {len(matched_files)} files")
+
+    # Process --remainder
+    if remainder_topic:
+        remainder_ids = []
+        remainder_size = 0
+        remainder_files = set()
+        for h in all_hunks:
+            if h["id"] not in assignments:
+                assignments[h["id"]] = remainder_topic
+                remainder_ids.append(h["id"])
+                remainder_size += h.get("added_lines", 0) + h.get("removed_lines", 0)
+                remainder_files.add(h["_file_path"])
+        if remainder_ids:
+            topic_meta[remainder_topic] = {
+                "id": remainder_topic, "name": remainder_topic,
+                "description": "Remaining unassigned hunks",
+                "estimated_size": remainder_size, "hunk_ids": remainder_ids,
+                "is_shared": False,
+            }
+            typer.echo(f"  {remainder_topic}: {len(remainder_ids)} hunks, {remainder_size} lines, {len(remainder_files)} files")
+
+    # Check for unassigned
+    unassigned = [h for h in all_hunks if h["id"] not in assignments]
+    if unassigned:
+        typer.echo(f"\n  WARNING: {len(unassigned)} hunks unassigned:")
+        for h in unassigned[:10]:
+            typer.echo(f"    {h['_file_path']} scope={h.get('scope', [])}")
+        if len(unassigned) > 10:
+            typer.echo(f"    ... and {len(unassigned) - 10} more")
+
+    # Build edges
+    edges = []
+    for dep_spec in deps:
+        parts = dep_spec.split(":")
+        if len(parts) == 2:
+            edges.append({"from": parts[0], "to": parts[1]})
+
+    # Write discovery.json
+    discovery = {
+        "dag": {
+            "topics": topic_meta,
+            "edges": edges,
+        },
+        "assignments": assignments,
+    }
+
+    output_file.write_text(json.dumps(discovery, indent=2))
+    total = len(assignments)
+    typer.echo(f"\nWrote {output_file}: {total} hunks across {len(topic_meta)} topics, {len(edges)} edges")
+
+
 @app.command(name="show-plan")
 def show_plan(
     plan_file: Path = typer.Argument(..., help="Path to plan JSON"),
@@ -858,7 +1022,9 @@ def validate_discovery(
         typer.echo(f"Fixed: {len(fixed_assignments)} assignments, sizes computed")
         assignments = fixed_assignments
     else:
-        assignments = _get_assignments(discovery, hunks_data)
+        # For validation, use assignments as-is (no virtual→raw resolution)
+        # We want to check that discovery IDs match hunks.json IDs directly
+        assignments = _get_assignments(discovery)
 
     assigned_ids = set(assignments.keys())
 
