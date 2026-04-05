@@ -11,8 +11,11 @@ This makes all invocations match a single whitelistable pattern.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -22,6 +25,33 @@ from split_pr.dag import TopicDAG
 from split_pr.state import SplitPlanner
 
 app = typer.Typer(help="Split-PR tools — called by the split-pr skill and agents.")
+
+
+@app.callback()
+def _audit_log(ctx: typer.Context) -> None:
+    """Log every CLI invocation to the run directory's audit log."""
+    # Find a /tmp/split-pr-* path in the arguments to determine the run dir
+    run_dir = None
+    for arg in sys.argv[1:]:
+        if "/tmp/split-pr-" in arg:
+            # Extract the run directory from the path
+            parts = arg.split("/")
+            for i, p in enumerate(parts):
+                if p.startswith("split-pr-") and i > 0:
+                    run_dir = "/".join(parts[: i + 1])
+                    break
+            if run_dir:
+                break
+
+    if run_dir:
+        log_path = Path(run_dir) / "cli-audit.log"
+        try:
+            with open(log_path, "a") as f:
+                ts = datetime.now().strftime("%H:%M:%S")
+                cmd = " ".join(sys.argv[1:])
+                f.write(f"{ts}  {cmd}\n")
+        except OSError:
+            pass  # Don't fail if we can't write the log
 
 
 def _get_assignments(discovery: dict, hunks_data: dict | None = None) -> dict[str, str]:
@@ -202,13 +232,20 @@ def bundle_context(
 @app.command()
 def stats(
     hunks_file: Path = typer.Argument(..., help="Path to hunks JSON from parse-diff"),
+    sort: str = typer.Option("", "--sort", help="Sort files by: size (descending)"),
+    top: int = typer.Option(0, "--top", "-n", help="Show only the top N files"),
 ) -> None:
     """Print summary statistics for a parsed diff."""
     data = json.loads(hunks_file.read_text())
     typer.echo(f"Files: {data['file_count']}")
     typer.echo(f"Hunks: {data['hunk_count']}")
     typer.echo(f"Total lines changed: {data['total_size']}")
-    for f in data["files"]:
+    files = data["files"]
+    if sort == "size":
+        files = sorted(files, key=lambda f: f["total_size"], reverse=True)
+    if top > 0:
+        files = files[:top]
+    for f in files:
         typer.echo(f"  {f['path']}: {f['total_size']} lines, {len(f['hunks'])} hunks"
                    + (" [new]" if f["is_new"] else "")
                    + (" [deleted]" if f["is_deleted"] else ""))
@@ -220,27 +257,37 @@ def list_hunks(
     detail: bool = typer.Option(False, "--detail", "-d", help="Show scope, signature, and refs per hunk"),
     skip: str = typer.Option("", "--skip", help="Comma-separated path patterns to exclude"),
     only: str = typer.Option("", "--only", help="Only show files matching these path patterns"),
+    scope: str = typer.Option("", "--scope", help="Only show hunks whose scope contains this substring"),
+    status: str = typer.Option("", "--status", help="Filter by status: NEW, MOD, or DEL"),
+    sort: str = typer.Option("", "--sort", help="Sort files by: size (descending) or name"),
+    top: int = typer.Option(0, "--top", "-n", help="Show only the top N files"),
     summary: bool = typer.Option(False, "--summary", "-s", help="Show totals at the end"),
 ) -> None:
     """List all files with their hunk IDs, sizes, and flags.
 
     Use --detail to include scope, signature, and symbol references per hunk.
     Use --skip to exclude paths. Use --only to show only matching paths.
-    Use --summary for totals.
+    Use --scope to filter by function/class name. Use --sort size to rank by size.
+    Use --top N to limit output. Use --summary for totals.
     """
     data = json.loads(hunks_file.read_text())
     skip_patterns = tuple(p.strip() for p in skip.split(",") if p.strip()) if skip else ()
     only_patterns = tuple(p.strip() for p in only.split(",") if p.strip()) if only else ()
+    status_filter = status.upper() if status else ""
 
-    total_files = 0
-    total_hunks = 0
-    total_lines = 0
-
+    # First pass: collect file entries with computed metadata
+    file_entries: list[dict] = []
     for f in data["files"]:
         if skip_patterns and any(p in f["path"] for p in skip_patterns):
             continue
         if only_patterns and not any(p in f["path"] for p in only_patterns):
             continue
+
+        hunks = f["hunks"]
+        if scope:
+            hunks = [h for h in hunks if any(scope in s for s in h.get("scope", []))]
+            if not hunks:
+                continue
 
         if f["is_new"]:
             marker = "NEW"
@@ -249,23 +296,51 @@ def list_hunks(
         else:
             marker = "MOD"
 
+        if status_filter and marker != status_filter:
+            continue
+
+        file_size = sum(h.get("added_lines", 0) + h.get("removed_lines", 0) for h in hunks)
+        file_entries.append({
+            "file": f, "hunks": hunks, "marker": marker, "size": file_size,
+        })
+
+    # Sort
+    if sort == "size":
+        file_entries.sort(key=lambda e: e["size"], reverse=True)
+    elif sort == "name":
+        file_entries.sort(key=lambda e: e["file"]["path"])
+
+    # Limit
+    if top > 0:
+        file_entries = file_entries[:top]
+
+    # Output
+    total_files = 0
+    total_hunks = 0
+    total_lines = 0
+
+    for entry in file_entries:
+        f = entry["file"]
+        hunks = entry["hunks"]
+        marker = entry["marker"]
+
         total_files += 1
-        total_hunks += len(f["hunks"])
-        total_lines += f["total_size"]
+        total_hunks += len(hunks)
+        total_lines += entry["size"]
 
         if not detail:
-            hunk_ids = [h["id"] for h in f["hunks"]]
+            hunk_ids = [h["id"] for h in hunks]
             typer.echo(
                 f"{marker:3} {f['total_size']:5} {f['path']}  "
                 f"[{len(hunk_ids)} hunks: {','.join(hunk_ids)}]"
             )
         else:
             typer.echo(f"{marker:3} {f['total_size']:5} {f['path']}")
-            for h in f["hunks"]:
+            for h in hunks:
                 size = h.get("added_lines", 0) + h.get("removed_lines", 0)
-                scope = h.get("scope", [])
+                h_scope = h.get("scope", [])
                 sig = h.get("signature", "")
-                scope_str = f"  scope={scope}" if scope else ""
+                scope_str = f"  scope={h_scope}" if h_scope else ""
                 sig_str = f"  sig={sig[:80]}" if sig else ""
                 typer.echo(f"    {h['id']}  size={size}{scope_str}{sig_str}")
 
@@ -327,6 +402,224 @@ def show_hunks(
         if missing:
             for m in sorted(missing):
                 typer.echo(f"{m} NOT FOUND")
+
+
+@app.command(name="find-symbol")
+def find_symbol(
+    hunks_file: Path = typer.Argument(..., help="Path to analyzed hunks JSON"),
+    symbol: str = typer.Argument(..., help="Symbol name to search for"),
+    exact: bool = typer.Option(False, "--exact", "-e", help="Exact match (default: substring)"),
+    summary: bool = typer.Option(False, "--summary", "-s", help="Show counts only"),
+) -> None:
+    """Find which hunks define or reference a symbol.
+
+    Searches symbols_defined and symbols_referenced in analyzed hunks.
+    Use for import tracing: find where a function is defined and who calls it.
+    Use --summary for counts only (no per-hunk output).
+    """
+    data = json.loads(hunks_file.read_text())
+
+    def matches(name: str) -> bool:
+        return name == symbol if exact else symbol in name
+
+    defined_count = 0
+    referenced_count = 0
+
+    for file_info in data["files"]:
+        for h in file_info["hunks"]:
+            fp = file_info.get("path", h.get("file_path", "?"))
+            scope = h.get("scope", [])
+
+            defined = [s for s in h.get("symbols_defined", []) if matches(s)]
+            referenced = [s for s in h.get("symbols_referenced", []) if matches(s)]
+
+            if defined:
+                defined_count += 1
+                if not summary:
+                    typer.echo(
+                        f"DEFINED:    {fp:50} scope={scope}  +{h.get('added_lines',0)}/-{h.get('removed_lines',0)}"
+                        f"  symbols={defined}"
+                    )
+            if referenced:
+                referenced_count += 1
+                if not summary:
+                    typer.echo(
+                        f"REFERENCED: {fp:50} scope={scope}  +{h.get('added_lines',0)}/-{h.get('removed_lines',0)}"
+                        f"  symbols={referenced}"
+                    )
+
+    if summary or (defined_count + referenced_count > 0):
+        typer.echo(f"\n{defined_count} definitions, {referenced_count} references")
+
+
+@app.command(name="show-discovery")
+def show_discovery(
+    hunks_file: Path = typer.Argument(..., help="Path to analyzed hunks JSON"),
+    discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
+    topic: str = typer.Option("", "--topic", "-t", help="Show details for one topic"),
+    sort: str = typer.Option("", "--sort", help="Sort topics by: size (descending)"),
+    only: str = typer.Option("", "--only", help="With --topic: only show files matching these patterns"),
+    skip: str = typer.Option("", "--skip", help="With --topic: exclude files matching these patterns"),
+) -> None:
+    """Show discovery state: topics, sizes, and unassigned hunks.
+
+    Computes real sizes from hunk data (not estimated_size). Use --topic
+    to drill into one topic's files and scopes. Use --sort size to rank
+    topics by size. Use --only/--skip with --topic to filter files.
+    """
+    hunks_data = json.loads(hunks_file.read_text())
+    discovery = json.loads(discovery_file.read_text())
+
+    # Build hunk index
+    hunk_info: dict[str, dict] = {}
+    for file_info in hunks_data["files"]:
+        for h in file_info["hunks"]:
+            hunk_info[h["id"]] = {
+                "file": file_info.get("path", h.get("file_path", "?")),
+                "scope": h.get("scope", []),
+                "size": h.get("added_lines", 0) + h.get("removed_lines", 0),
+            }
+
+    assignments = _get_assignments(discovery)
+    all_hunk_ids = set(hunk_info.keys())
+    assigned_ids = set(assignments.keys())
+
+    # Get DAG edges for dependencies
+    edges = discovery.get("dag", {}).get("edges", [])
+    dep_map: dict[str, list[str]] = {}
+    for e in edges:
+        dep_map.setdefault(e["to"], []).append(e["from"])
+
+    if topic:
+        # Detail view for one topic
+        topic_hunks = [hid for hid, tid in assignments.items() if tid == topic]
+        if not topic_hunks:
+            typer.echo(f"Topic '{topic}' not found or has no assignments.")
+            raise typer.Exit(1)
+
+        total_size = sum(hunk_info[h]["size"] for h in topic_hunks if h in hunk_info)
+        files: dict[str, list[dict]] = {}
+        for hid in topic_hunks:
+            info = hunk_info.get(hid)
+            if info:
+                files.setdefault(info["file"], []).append({"id": hid, **info})
+
+        deps = dep_map.get(topic, [])
+        dep_str = f"  depends_on: {', '.join(deps)}" if deps else ""
+        typer.echo(f"{topic}: {len(topic_hunks)} hunks, {total_size} lines, {len(files)} files{dep_str}")
+
+        # Show topic description if available
+        topic_data = discovery.get("dag", {}).get("topics", {}).get(topic, {})
+        desc = topic_data.get("description", "")
+        if desc and not desc.startswith("Assigned by"):
+            typer.echo(f"  {desc[:200]}")
+
+        skip_patterns = tuple(p.strip() for p in skip.split(",") if p.strip()) if skip else ()
+        only_patterns = tuple(p.strip() for p in only.split(",") if p.strip()) if only else ()
+
+        typer.echo()
+        for fp in sorted(files.keys()):
+            if skip_patterns and any(p in fp for p in skip_patterns):
+                continue
+            if only_patterns and not any(p in fp for p in only_patterns):
+                continue
+            file_hunks = files[fp]
+            file_size = sum(h["size"] for h in file_hunks)
+            typer.echo(f"  {fp}  ({len(file_hunks)} hunks, {file_size} lines)")
+            for h in file_hunks:
+                scope_str = f"  scope={h['scope']}" if h["scope"] else ""
+                typer.echo(f"    {h['id']}  size={h['size']}{scope_str}")
+    else:
+        # Summary view
+        unassigned = all_hunk_ids - assigned_ids
+        typer.echo(f"{len(discovery['dag']['topics'])} topics, {len(assigned_ids)} assigned, {len(unassigned)} unassigned\n")
+
+        # Per-topic summary
+        topic_stats: dict[str, dict] = {}
+        for hid, tid in assignments.items():
+            if tid not in topic_stats:
+                topic_stats[tid] = {"hunks": 0, "size": 0, "files": set()}
+            info = hunk_info.get(hid)
+            if info:
+                topic_stats[tid]["hunks"] += 1
+                topic_stats[tid]["size"] += info["size"]
+                topic_stats[tid]["files"].add(info["file"])
+
+        # Determine order
+        if sort == "size":
+            order = sorted(topic_stats.keys(), key=lambda t: topic_stats[t]["size"], reverse=True)
+        else:
+            # Default: topological order
+            try:
+                dag = TopicDAG.from_dict(discovery["dag"])
+                order = dag.topological_sort()
+            except Exception:
+                order = sorted(topic_stats.keys())
+
+        for tid in order:
+            s = topic_stats.get(tid)
+            if not s:
+                continue
+            deps = dep_map.get(tid, [])
+            dep_str = f"  depends: {', '.join(deps)}" if deps else ""
+            typer.echo(
+                f"  {tid:40} {s['hunks']:4} hunks  {s['size']:5} lines  "
+                f"{len(s['files']):2} files{dep_str}"
+            )
+
+        if unassigned:
+            typer.echo(f"\nUnassigned ({len(unassigned)}):")
+            for hid in sorted(unassigned):
+                info = hunk_info.get(hid)
+                if info:
+                    scope_str = f"  scope={info['scope']}" if info["scope"] else ""
+                    typer.echo(f"  {info['file']}{scope_str}  size={info['size']}")
+
+
+@app.command(name="update-metadata")
+def update_metadata(
+    discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
+    metadata_file: Path = typer.Argument(..., help="Path to metadata JSON"),
+) -> None:
+    """Update topic metadata in discovery.json from a metadata file.
+
+    The metadata file should contain a JSON object mapping topic IDs to
+    their metadata updates. Supported fields: name, description, is_shared,
+    key_files. Only provided fields are updated; missing fields are left
+    unchanged.
+
+    Example metadata file:
+        {
+          "forecast-adapter": {
+            "name": "Forecast adapter layer",
+            "description": "Bridges Pydantic models to legacy functions...",
+            "is_shared": false,
+            "key_files": [
+              {"path": "adapter.py", "note": "14 adapter functions"}
+            ]
+          }
+        }
+    """
+    discovery = json.loads(discovery_file.read_text())
+    metadata = json.loads(metadata_file.read_text())
+
+    topics = discovery.get("dag", {}).get("topics", {})
+    updated = 0
+    skipped = []
+
+    for topic_id, updates in metadata.items():
+        if topic_id not in topics:
+            skipped.append(topic_id)
+            continue
+        for field in ("name", "description", "is_shared", "key_files"):
+            if field in updates:
+                topics[topic_id][field] = updates[field]
+        updated += 1
+
+    discovery_file.write_text(json.dumps(discovery, indent=2))
+    typer.echo(f"Updated {updated} topics in {discovery_file}")
+    if skipped:
+        typer.echo(f"Skipped (not found): {', '.join(skipped)}")
 
 
 @app.command(name="assign-hunks")
@@ -435,12 +728,16 @@ def assign_hunks(
                     matched_size += h.get("added_lines", 0) + h.get("removed_lines", 0)
                     matched_files.add(h["_file_path"])
 
-        topic_meta[topic_name] = {
-            "id": topic_name, "name": topic_name,
-            "description": f"Assigned by {match_type}: {','.join(match_values[:5])}",
-            "estimated_size": matched_size, "hunk_ids": matched_ids,
-            "is_shared": False,
-        }
+        if topic_name in topic_meta:
+            topic_meta[topic_name]["hunk_ids"].extend(matched_ids)
+            topic_meta[topic_name]["estimated_size"] += matched_size
+        else:
+            topic_meta[topic_name] = {
+                "id": topic_name, "name": topic_name,
+                "description": f"Assigned by {match_type}: {','.join(match_values[:5])}",
+                "estimated_size": matched_size, "hunk_ids": matched_ids,
+                "is_shared": False,
+            }
         typer.echo(f"  {topic_name}: {len(matched_ids)} hunks, {matched_size} lines, {len(matched_files)} files")
 
     # Process --remainder
@@ -490,7 +787,15 @@ def assign_hunks(
 
     output_file.write_text(json.dumps(discovery, indent=2))
     total = len(assignments)
-    typer.echo(f"\nWrote {output_file}: {total} hunks across {len(topic_meta)} topics, {len(edges)} edges")
+    unassigned_count = len(unassigned)
+    typer.echo(f"\nWrote {output_file}: {total}/{total + unassigned_count} hunks assigned, "
+               f"{len(topic_meta)} topics, {len(edges)} edges")
+
+    # Validation summary (same info as validate-discovery)
+    if unassigned_count == 0:
+        typer.echo("VALID: All hunks assigned.")
+    else:
+        typer.echo(f"INVALID: {unassigned_count} hunks unassigned.")
 
 
 @app.command(name="show-plan")
@@ -959,14 +1264,16 @@ def check_sizes(
     diff_file: Path = typer.Argument(..., help="Path to unified diff file"),
     discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
     threshold: int = typer.Argument(400, help="Max lines per split PR"),
+    hunks_file: Path = typer.Option(None, "--hunks", help="Analyzed hunks JSON (for virtual ID resolution)"),
 ) -> None:
     """Check topic sizes and report any that exceed the threshold."""
     parsed = parse_diff(diff_file.read_text())
     discovery = json.loads(discovery_file.read_text())
+    hunks_data = json.loads(hunks_file.read_text()) if hunks_file else None
     dag = TopicDAG.from_dict(discovery["dag"])
 
     planner = SplitPlanner(parsed, dag, size_threshold=threshold)
-    planner.assign_hunks(_get_assignments(discovery))
+    planner.assign_hunks(_get_assignments(discovery, hunks_data))
     oversized = planner.get_oversized_topics()
 
     if not oversized:
