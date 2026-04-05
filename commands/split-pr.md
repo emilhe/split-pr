@@ -63,7 +63,8 @@ Available commands:
 | `parse-diff <diff>` | Parse unified diff into hunks JSON |
 | `analyze <hunks> <repo_dir>` | Enrich hunks with AST analysis, split large new files |
 | `stats <hunks>` | Summary: file count, hunk count, per-file sizes |
-| `list-hunks <hunks>` | All files with hunk IDs, sizes, flags |
+| `list-hunks <hunks> --detail --skip X --only X --summary` | All files with scopes, signatures, filtering |
+| `assign-hunks <hunks> <output> --topic X --bulk-topic X --dep X` | Assign hunks to topics by scope/path (no IDs needed) |
 | `show-hunks <hunks> [ids] --file X --preview N` | Inspect hunks by ID or file path, with content preview |
 | `show-plan <plan> -v --branch X` | Plan summary with dependencies, files per branch. **Branches are in merge order.** |
 | `build-plan <diff> <discovery> <base> <threshold>` | Generate split plan from discovery |

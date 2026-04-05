@@ -93,20 +93,14 @@ any commit-level grouping.
 
 ### Step 2: Read and understand the hunks
 
-Get the full file listing with hunk IDs using the CLI:
+Get the full file listing with scopes and signatures:
 
 ```bash
 split-pr-tools list-hunks $RUN/hunks.json --detail
 ```
 
-This outputs every file with hunk IDs, sizes, scopes, and signatures.
-
-**CRITICAL: The hunk IDs shown by `list-hunks` are the ONLY valid IDs.**
-The hunks.json may contain virtual IDs (from AST splitting of large files
-like adapter.py into per-function hunks). These virtual IDs are different
-from raw diff IDs. When writing discovery.json, use ONLY the IDs from
-`list-hunks` output. Do NOT get IDs from `parse-diff`, `git diff`, or
-any other source — those will be the wrong IDs.
+This shows every file with per-hunk scope (function name), signature,
+and size. Use this to understand what each hunk does.
 
 Read the bundled source context (all changed files in one file):
 
@@ -114,18 +108,14 @@ Read the bundled source context (all changed files in one file):
 cat $RUN/context.txt
 ```
 
-This contains all changed files with clear `=== path ===` delimiters.
+This contains all changed files with `<file path="...">` XML tags.
 Use this for understanding context — do NOT read individual source files
 unless the bundle is insufficient for a specific ambiguous case.
 
-Each hunk in the analyzed hunks.json also has embedded metadata:
-- `scope`: which function/class the hunk is inside
-- `signature`: the function/class signature line
-- `symbols_referenced`: identifiers used (hints at which feature)
-- `imports`: module imports in the region
-
-Between the bundle and the hunk metadata, you should have enough context
-to classify most hunks without additional file reads.
+**You do NOT need to work with hunk IDs.** The `assign-hunks` command
+in Step 8 will resolve function names and file paths to the correct IDs
+automatically. Focus on understanding WHAT each function/file does and
+WHICH topic it belongs to.
 
 ### Step 3: Identify generated/vendor code
 
@@ -343,18 +333,50 @@ If you find hunks that resist clean classification:
   function serve different purposes, assign each hunk to its primary topic
   and note the dependency
 
-### Step 8: Validate and write output
+### Step 8: Write output using assign-hunks
 
-Write the output to `$RUN/discovery.json`, then validate it:
+**Do NOT write discovery.json manually.** Use the `assign-hunks` command
+which resolves function names and file paths to the correct hunk IDs
+automatically. You never need to look up or write a hunk ID.
+
+Build the command with one `--topic` per topic. Each topic is assigned
+by **scope** (function/class name) or **path** (file path pattern):
 
 ```bash
-split-pr-tools validate-discovery $RUN/hunks.json $RUN/discovery.json --fix
+split-pr-tools assign-hunks $RUN/hunks.json $RUN/discovery.json \
+  --bulk-topic "legacy-shims" --bulk-path "_legacy/_shims/" \
+  --topic "forecast-adapter:scope:get_versions_adapter,fill_in_otb_adapter,..." \
+  --topic "manage-cubes:scope:clone_brand_adapter,trim_cube_adapter,..." \
+  --topic "config:path:config.py,pyproject.toml,.gitignore,uv.lock" \
+  --topic "database:path:database/" \
+  --topic "caching:path:caching/" \
+  --topic "auth:path:auth/" \
+  --topic "forecast-routes:path:inseason/forecast/" \
+  --topic "manage-cubes-routes:path:inseason/manage_cubes/" \
+  --remainder "other" \
+  --dep "config:database" \
+  --dep "database:caching"
 ```
 
-The `--fix` flag computes `estimated_size` per topic from actual hunk data,
-builds the `assignments` dict from `hunk_ids`, and writes the corrected
-discovery back. This checks all hunks are assigned, no cycles exist, and prints per-topic
-stats with dependency info. If it reports INVALID, fix the issues and re-run.
+**Topic assignment format:**
+- `"name:scope:func1,func2,..."` — assign hunks whose scope matches these function names
+- `"name:path:pattern1,pattern2,..."` — assign hunks whose file path contains these patterns
+- `"name:func1,func2"` — auto-detects: paths (contain `/` or `.py`) vs scopes
 
-Report the validation summary: number of topics, independent groups, any
-topics that couldn't be brought under the threshold.
+**Special options:**
+- `--bulk-topic` + `--bulk-path` — assigns all hunks matching the path pattern
+- `--remainder "name"` — catches anything not yet assigned
+- `--dep "from:to"` — adds a dependency edge
+
+After running `assign-hunks`, validate:
+
+```bash
+split-pr-tools validate-discovery $RUN/hunks.json $RUN/discovery.json
+```
+
+If it reports INVALID (missing or extra hunks), adjust the `--topic`
+patterns and re-run `assign-hunks`. Common fixes:
+- Missing hunks → add more `--topic` patterns or use `--remainder`
+- Scope not matching → check `list-hunks --detail` for exact scope names
+
+Report the validation summary: number of topics, sizes, dependencies.
