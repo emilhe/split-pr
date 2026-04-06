@@ -5,8 +5,7 @@ description: >
   Use when the user says "/split-pr", asks to split a PR, or wants to break
   a large branch into smaller pieces. Accepts optional arguments:
   --base <branch> (default: main), --threshold <lines> (default: 400),
-  --max-files <n> (default: 10), --auto (skip interactive reviews),
-  --dag (use DAG-based branching instead of default linear chain).
+  --max-files <n> (default: 10), --auto (skip interactive reviews).
 user-invocable: true
 allowed-tools:
   - Bash(split-pr-tools *)
@@ -39,47 +38,41 @@ allowed-tools:
 
 Split a large PR or branch diff into a chain of smaller, reviewable PRs.
 
-## CRITICAL RULES
+## Rules
 
-**NEVER use `python3 -c`, `python3 -c "..."`, or any form of inline Python.**
+1. Use `split-pr-tools <command>` for all computation. No `python3 -c`, no inline Python.
+2. No compound shell commands (`cd && ...`, pipes through `grep`/`sort`). Use absolute paths or `git -C`.
+3. If the CLI cannot do something, report it as a gap — do not work around it.
 
-**NEVER use `cd <dir> && <command>` or compound shell commands.** Use
-absolute paths or `git -C <dir>` instead. Compound commands trigger
-un-skippable permission prompts.
-This applies to all phases, all agents, and all subagents. Inline Python
-triggers security warnings and approval prompts that cannot be pre-authorized.
-There is NO exception to this rule.
-
-ALL Python operations go through the `split-pr-tools` CLI:
-
-```bash
-split-pr-tools <command> <args>
-```
-
-Available commands:
+## CLI Reference
 
 | Command | Purpose |
 |---------|---------|
 | `parse-diff <diff>` | Parse unified diff into hunks JSON |
-| `stats <hunks>` | Summary: file count, hunk count, per-file sizes |
-| `list-hunks <hunks>` | All files with hunk IDs, sizes, flags |
+| `analyze <hunks> <repo_dir> [--bulk <paths>]` | Enrich hunks with AST analysis, split large new files |
+| `bundle-context <hunks> <repo_dir> [output] [--skip <paths>]` | Bundle all changed files into one context file |
+| `stats <hunks> [--sort size] [--top N]` | Summary: file count, hunk count, per-file sizes |
+| `list-hunks <hunks> --detail --skip X --only X --scope X --status MOD --sort size --top N --summary` | All files with scopes, signatures, filtering, sorting |
+| `find-symbol <hunks> <name> --exact --summary` | Import tracing: find where a symbol is defined and who references it |
+| `show-discovery <hunks> <discovery> --topic X --sort size --only X --skip X` | Topic summary with real sizes, or drill into one topic's files |
+| `update-metadata <discovery> [metadata.json] --set "topic:field=value"` | Update topic metadata inline or from a JSON file |
+| `assign-hunks <hunks> <output> --topic X --bulk-topic X --dep X` | Assign hunks to topics by scope/path (no IDs needed) |
+| `edit-edges <discovery> --add "from:to" --remove "from:to"` | Add/remove edges without re-running assign-hunks |
+| `merge-topics <discovery> "a,b" "New Name"` | Merge topics, preserving external edges and metadata |
 | `show-hunks <hunks> [ids] --file X --preview N` | Inspect hunks by ID or file path, with content preview |
 | `show-plan <plan> -v --branch X` | Plan summary with dependencies, files per branch. **Branches are in merge order.** |
-| `build-plan <diff> <discovery> <base> <threshold>` | Generate split plan from discovery |
+| `build-plan <diff> <discovery> <base> <threshold> --hunks <hunks>` | Generate split plan from discovery |
 | `build-patches <diff> <plan> -o <dir>` | Write patch files for each branch |
 | `create-branches <diff> <plan> <repo> --author X --prefix X` | Create all branches, apply patches, commit (one command) |
 | `push-branches <plan> <repo>` | Push all split branches to remote (one command) |
-| `create-prs <plan> <discovery> <owner/repo> --name X --branch X` | Create all PRs with DAG diagrams (one command) |
-| `check-sizes <diff> <discovery> <threshold>` | Report oversized topics |
+| `create-prs <plan> <discovery> <owner/repo> [--name X] [--original-pr N] [--tracking-issue N]` | Create all PRs with DAG diagrams (one command) |
+| `check-sizes <diff> <discovery> <threshold> --hunks <hunks>` | Report oversized topics (pass --hunks for analyzed diffs) |
 | `validate-discovery <hunks> <discovery>` | Check assignments, cycles, topic stats |
 | `verify <diff> <plan>` | Verify split is lossless before execution |
+| `verify-git <plan> <repo> <branch>` | Verify split branches reproduce original branch exactly |
 | `render-dag <discovery> -h <topic> -l <links>` | Mermaid DAG, highlighted node, clickable |
 | `render-dag-full <discovery> [plan] -l <links>` | Full DAG for tracking issue |
-| `score <discovery> <gt> [hunks]` | Score against ground truth |
 | `detect-validators` | Detect ruff/tsc/pytest/etc in CWD |
-
-If you need something the CLI doesn't provide, report it as a gap — do NOT
-work around it with inline Python.
 
 ## Arguments
 
@@ -91,9 +84,9 @@ Parse the user's input after `/split-pr` for these optional flags:
 | `--threshold <n>` | `400` | Max lines per split PR |
 | `--max-files <n>` | `10` | Max files per split PR |
 | `--auto` | off | Skip interactive review steps |
-| `--dag` | off | Use DAG-based branching (parallel review, but PRs may not pass tests individually) |
 | `--name <label>` | branch name (truncated to 20 chars) | Short label for PR title prefix |
 | `--pr <number>` | none | Analyze an existing PR instead of current branch |
+| `--bulk <paths>` | none | Comma-separated path patterns for vendored/bulk code (skips AST analysis) |
 
 ## Flow
 
@@ -125,21 +118,35 @@ git diff <base>...HEAD > $RUN/diff.txt
 
 If the diff is empty, tell the user and stop.
 
-### Phase 2: Parse the diff
-
-Run these two commands in sequence — they give you everything you need:
+### Phase 2: Parse and analyze the diff
 
 ```bash
 split-pr-tools parse-diff $RUN/diff.txt > $RUN/hunks.json
 ```
 
 ```bash
+split-pr-tools analyze $RUN/hunks.json <repo_dir>
+```
+
+If `--bulk` was passed, add it: `split-pr-tools analyze $RUN/hunks.json <repo_dir> --bulk "<paths>"`
+
+The `analyze` command enriches hunks with AST analysis using tree-sitter:
+- Splits large new-file hunks into per-declaration virtual hunks
+- Adds scope info (which function/class each hunk is inside)
+- This enables hunk-level splitting of files like adapter.py
+
+```bash
 split-pr-tools stats $RUN/hunks.json
 ```
 
-The `stats` command outputs file count, hunk count, total lines, and a
-per-file breakdown with sizes, hunk counts, and [new]/[deleted] flags.
-This is the complete summary — do NOT parse the JSON yourself.
+Bundle all source files for the discovery agent (one read instead of 50+):
+
+```bash
+split-pr-tools bundle-context $RUN/hunks.json <repo_dir> $RUN/context.txt
+```
+
+If `--bulk` was passed, also skip those paths in the bundle:
+`split-pr-tools bundle-context $RUN/hunks.json <repo_dir> $RUN/context.txt --skip "<paths>"`
 
 Report the summary to the user. If total size is under the threshold, tell
 the user the PR is already small enough and stop (unless they insist).
@@ -153,12 +160,29 @@ Pass it:
 - The size threshold (lines)
 - The max files threshold
 - The working directory (so it can read source files for context)
+- If `--bulk` was passed, tell the agent which paths are bulk
+
+**Do NOT include your own analysis of the diff, suggested topic boundaries,
+or commentary about how files should be grouped.** The discovery agent has
+its own heuristics and rules for classification. If you pre-digest the diff
+("the adapter is one layer", "shims could be grouped by subpackage"), the
+agent will follow your framing instead of applying its own rules — even
+when your framing contradicts those rules. Pass only the mechanical inputs
+listed above and let the agent do its job.
 
 The agent reads `$RUN/hunks.json` and writes `$RUN/discovery.json`.
 
 ### Phase 4: Review (unless --auto)
 
-Read the discovery output. Present to the user:
+Read the discovery output:
+
+```bash
+split-pr-tools render-dag $RUN/discovery.json
+split-pr-tools check-sizes $RUN/diff.txt $RUN/discovery.json <threshold> --hunks $RUN/hunks.json
+split-pr-tools show-discovery $RUN/hunks.json $RUN/discovery.json
+```
+
+Present to the user:
 
 1. **Topic tree** with estimated sizes
 2. **Dependency graph** (which topics depend on which)
@@ -172,15 +196,15 @@ Ask the user if they want to:
 - Adjust dependencies
 - Abort
 
-If they request changes, apply them using the Python DAG operations and
-re-present. Loop until approved.
+If they request changes, re-run `assign-hunks` with adjusted topics or
+`update-metadata` for renames/descriptions. Re-present until approved.
 
 If `--auto`, skip this phase entirely.
 
 ### Phase 5: Build the split plan
 
 ```bash
-split-pr-tools build-plan $RUN/diff.txt $RUN/discovery.json <base> <threshold> > $RUN/plan.json
+split-pr-tools build-plan $RUN/diff.txt $RUN/discovery.json <base> <threshold> --hunks $RUN/hunks.json > $RUN/plan.json
 ```
 
 Then verify the split is lossless — all hunks accounted for, none duplicated:
@@ -197,12 +221,11 @@ Launch the `pr-splitter` agent **in a worktree** to execute the plan.
 
 Pass it:
 - The run directory: `$RUN`
-- Whether to use DAG branching: `--dag` flag (default is linear)
 - The `--name` label (for PR title prefix)
 - The original branch name (for reference in PR descriptions)
 
-The agent works in an isolated worktree, creates branches, applies patches,
-validates, and creates PRs.
+The agent creates branches, validates, pushes, and creates PRs. It runs
+`verify-git` internally to confirm the split is lossless before pushing.
 
 ### Phase 7: Report
 
@@ -262,25 +285,15 @@ serves as the single reference point for the entire split.
   can re-run with adjusted parameters or manually handle that topic.
 - If `gh` is not authenticated, tell the user to run `gh auth login`
 
-## Permissions
+## Setup
 
-The skill's `allowed-tools` covers orchestrator commands (diff parsing,
-plan building, temp file writes). For fully hands-free operation of the
-splitter agent, add these to your `~/.claude/settings.json` `permissions.allow`:
+For hands-free operation with `--auto`, add to `~/.claude/settings.json`
+under `permissions.allow`:
 
-**Safe (computational):**
 ```
-Bash(split-pr-tools *)
-Write(/tmp/split-pr-*)
-```
-
-**Git/GitHub (creates branches and PRs — opt in for `--auto` mode):**
-```
-Bash(git checkout *)
-Bash(git apply *)
-Bash(git add *)
-Bash(git commit *)
-Bash(git push *)
-Bash(gh pr create *)
+Bash(git checkout *), Bash(git apply *), Bash(git add *),
+Bash(git commit *), Bash(git push *), Bash(gh pr create *),
 Bash(gh issue create *)
 ```
+
+If `gh` is not authenticated, run `gh auth login` first.

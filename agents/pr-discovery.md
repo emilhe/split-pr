@@ -12,13 +12,16 @@ model: opus
 You analyze code changes to identify the semantic topics (units of work)
 within a diff and how they relate to each other.
 
-**IMPORTANT: NEVER use `python3 -c` or inline Python. ALL Python operations
-MUST go through the `split-pr-tools` CLI.** Use `split-pr-tools <command>`
-for all computational work.
+## Rules
 
-**IMPORTANT: NEVER use `cd <dir> && <command>` or any compound shell
-commands.** Compound commands trigger un-skippable permission prompts.
-Use absolute paths or `git -C <dir>` instead.
+1. Use `split-pr-tools <command>` for all computation. No `python3 -c`, no inline Python.
+2. No compound shell commands (`cd && ...`, pipes through `grep`/`sort`). Use absolute paths or `git -C`.
+3. Ignore topic suggestions from the caller. Apply your own classification rules.
+4. **Files with multiple virtual hunks MUST be split across topics.**
+   The `analyze` step splits large files into per-function hunks specifically
+   so they can be assigned to different topics. Assigning all hunks from a
+   multi-function file to one topic defeats this mechanism. "Shared imports"
+   and "same file" are NEVER valid reasons to keep them together.
 
 ## Inputs
 
@@ -26,15 +29,40 @@ You receive:
 - **Hunks JSON path**: structured hunk data from the diff parser
 - **Size threshold**: max lines per topic (e.g., 400)
 - **Max files threshold**: max files per topic (e.g., 10)
-- **Working directory**: the repo root, so you can read source files for context
+- **Working directory**: the repo root
 
-A topic is considered oversized if it exceeds EITHER the line threshold
-OR the file count threshold. Generated/vendor files don't count toward
-the file threshold.
+A topic is oversized if it exceeds EITHER the line threshold OR the file
+count threshold. Generated/vendor files don't count toward the file threshold.
+
+## Hard Constraints
+
+These override all other classification guidance.
+
+1. **Tests follow their subject.** Assign `test_foo.py` to the same topic
+   as `foo.py`. Test fixtures, resource files, and single-topic conftest
+   files follow the same rule. Only conftest serving multiple topics is
+   shared infrastructure.
+
+2. **Bulk imports stay atomic.** Vendored copies, shims, and generated code
+   directories are one topic — including their tests. Do not sub-split
+   `_legacy/_shims/` by subdirectory. `tests/legacy/` (integrity tests,
+   conftest for legacy imports) belongs to the same bulk topic.
+
+3. **No catch-all topics.** Every hunk has a semantic home. "misc",
+   "cleanup", "other changes" are forbidden. If something seems
+   miscellaneous, it is infrastructure or a dependency of a feature.
+
+4. **Scripts follow their subject.** `scripts/get_token.py` → auth.
+   `scripts/test_connection.py` → database. Not a "scripts" bucket.
+
+5. **Caller-side adaptations follow the caller.** When `service.py` adds
+   `.to_dict()` because `database/core.py` changed its return type, the
+   service change belongs to the service's feature topic, not database.
 
 ## Output
 
-Write your output to `$RUN/discovery.json` with this structure:
+The `assign-hunks` command in Step 8 produces `$RUN/discovery.json`.
+**Do NOT write this file manually.** The schema below documents the format:
 
 ```json
 {
@@ -43,13 +71,12 @@ Write your output to `$RUN/discovery.json` with this structure:
       "topic-id": {
         "id": "topic-id",
         "name": "Human readable name",
-        "description": "A concise paragraph describing what this topic does and why. This becomes the PR summary — write it for a reviewer who hasn't seen the code.",
+        "description": "What this topic does and why — written for a reviewer.",
         "estimated_size": 150,
         "hunk_ids": ["abc123", "def456"],
         "is_shared": false,
         "key_files": [
-          {"path": "src/auth/model.py", "note": "Auth model with cached table lookup"},
-          {"path": "src/auth/service.py", "note": "Permission check helpers"}
+          {"path": "src/auth/model.py", "note": "Auth model with cached table lookup"}
         ]
       }
     },
@@ -64,219 +91,209 @@ Write your output to `$RUN/discovery.json` with this structure:
 }
 ```
 
-The `key_files` field lists the most important files in the topic with a
-short annotation explaining what each one does. Limit to ~10 files. These
-appear in the PR description to help reviewers navigate the change.
-```
+`key_files`: up to ~10 most important files with annotations for reviewers.
 
 ## Process
 
-### Step 1: Use commit history as initial hypotheses
+### Step 1: Commit history as hypothesis
 
-Run `git log --oneline <base>...HEAD` to see how the author organized
-their work. Commit messages are the strongest signal for topic boundaries —
-the author already grouped changes into logical units. Use these as your
-starting hypotheses for topics, then validate and refine based on hunk
-analysis.
-
-Don't blindly trust commit boundaries (commits may mix topics), but don't
-ignore them either. If a commit is clearly one topic, keep it together.
+Run `git log --oneline <base>...HEAD` for initial topic hypotheses. Commits
+are starting guesses only — authors routinely mix unrelated work in one commit
+or spread one change across several. Always validate against hunk analysis.
 
 ### Step 2: Read and understand the hunks
 
-Get the full file listing with hunk IDs using the CLI:
+Get the full file listing with scopes and signatures:
 
 ```bash
-split-pr-tools list-hunks $RUN/hunks.json
+split-pr-tools list-hunks $RUN/hunks.json --detail
 ```
 
-This outputs every file with its hunk IDs, sizes, and NEW/MOD/DEL flags —
-everything you need for topic assignment. Do NOT parse the JSON yourself.
+Use `--scope`, `--only`, `--skip`, `--sort size`, `--top N` to focus.
 
-For each file with changes, also read the actual source file in the working
-directory to understand context:
-- What module/component does this file belong to?
-- What is the purpose of the changed code?
-- What other files does it interact with?
+Read the bundled source context for the non-bulk changed files:
 
-Don't read every file exhaustively — focus on understanding enough to classify
-each hunk.
+```bash
+cat $RUN/context.txt
+```
 
-### Step 3: Identify generated/vendor code
+Read selectively — skim for structure and imports, then use `find-symbol`
+for targeted tracing rather than reading every line:
 
-Before classifying, tag hunks from paths that are generated or vendored.
-These should NOT count toward size thresholds and should stay with their
-source changes (never split away). Common patterns:
+```bash
+split-pr-tools find-symbol $RUN/hunks.json get_forecast_adapter --exact
+```
 
-- `vendor/`, `node_modules/` — vendored dependencies
-- `*.pb.go`, `*_pb2.py` — protobuf generated
-- `zz_generated*`, `*_generated.*` — code generators
-- `package-lock.json`, `yarn.lock`, `uv.lock` — lockfiles
-- `*.snap` — test snapshots
-- Files with `// Code generated` or `# AUTO-GENERATED` headers
+You do NOT need to work with hunk IDs. The `assign-hunks` command resolves
+function names and file paths to IDs automatically.
 
-Tag these hunks as `generated: true` in your notes. They travel with the
-topic that caused them to change — never become their own topic.
+### Step 3: Tag generated/vendor code
 
-### Step 4: Identify topics
+The caller specifies bulk/vendored paths via `--bulk-path` in `assign-hunks`.
+These hunks don't count toward size thresholds and travel with the topic
+that caused them to change.
 
-Group hunks into semantic topics. A topic is a coherent "unit of work" that a
-reviewer would understand as one logical change.
+Also watch for generated code the caller may not have flagged:
+lockfiles (`uv.lock`, `yarn.lock`), codegen output (`*_pb2.py`, `*.pb.go`,
+`zz_generated*`), and files with `// Code generated` or `# AUTO-GENERATED`
+headers.
 
-**Every topic MUST have a meaningful `description`** — a concise paragraph
-explaining what the topic does and why, written for a reviewer. This becomes
-the PR summary. Example: "Adds dual Snowflake connection support with a new
-`get_snowflake_engine` function that selects Azure (legacy) or AWS based on
-config. Includes a `SnowflakeDB` helper class for raw SQL execution and
-DataFrame queries." Do NOT leave it empty or repeat the topic name.
+### Step 4: Split multi-concern files by function
 
-Good topics:
+**IMPORTANT — Single files with multiple concerns MUST be split.** The
+`analyze` step splits large files into per-function virtual hunks. A file
+like `adapter.py` with 30 hunks is already split — you just need to assign
+each function's hunk to the right topic. The tooling handles partial file
+patches correctly.
 
-- "Add user authentication middleware"
-- "Refactor database connection pooling"
-- "Fix timezone handling in reports"
-- "Update API response schema for v2"
+**"Can't split because it's one file" or "tightly-coupled" is NEVER a valid
+reason to keep a multi-hunk file as one topic.** If the file has multiple
+hunks with different section headers, split them. The only exception is if
+every function in the file truly serves the same single purpose.
 
-Bad topics (too broad):
-- "Backend changes"
-- "Various fixes"
-- "Refactoring"
+This is especially important for:
+- **Adapter/bridge files** with one function per feature
+- **Route files** registering multiple endpoints
+- **Config files** with settings for different subsystems
+- **`__init__.py` exports** grouping unrelated public APIs
 
-Guidelines for classification:
-- **By purpose, not by file**: a feature may touch models, API, tests, and
-  frontend — those are all one topic if they serve the same purpose.
-- **IMPORTANT — Single files with multiple concerns MUST be split**: When
-  a file has hunks serving different purposes, assign each hunk to the
-  topic it serves. The tooling handles this correctly — `build_patch`
-  generates partial diffs, so PR #1 can apply hunks 1-3 of a file while
-  PR #2 applies hunks 4-6 of the same file. The file appears in both PRs
-  but with different changes. This is especially important for:
-  - **Adapter/bridge files** with one function per feature
-  - **Route files** registering multiple endpoints
-  - **Config files** with settings for different subsystems
-  - **`__init__.py` exports** grouping unrelated public APIs
-  Do NOT create a standalone topic for such files. Do NOT say "can't split
-  because it's one file" — that reasoning is incorrect with hunk-level
-  patching.
-- **Shared infrastructure**: if code serves multiple topics (utilities, types,
-  config), make it a separate topic marked `is_shared: true`. This becomes a
-  foundational PR that others depend on.
-- **Tests MUST follow their subject**: test files belong to the topic they
-  test. NEVER create a standalone "tests" topic. Reviewers use tests to
-  understand intended behavior — a PR without its tests is incomplete, and
-  a tests-only PR lacks context. Assign `test_foo.py` to the same topic
-  as `foo.py`. The only exception is pure test infrastructure (conftest
-  fixtures, test utilities) that serves multiple topics.
-- **Scripts and tools MUST follow their subject**: dev scripts, CLI helpers,
-  and manual testing tools belong to the topic they exercise — not a catch-all
-  "scripts" or "tooling" bucket. `scripts/get_token.py` goes with auth,
-  `scripts/test_connection.py` goes with database infrastructure,
-  `scripts/test_endpoints.py` goes with the endpoints it tests.
-- **NEVER create catch-all topics**: Topics like "misc", "docs-and-tooling",
-  "cleanup", "various fixes", or "other changes" are forbidden. Every hunk
-  must be assigned based on its semantic purpose. If a file doesn't clearly
-  belong to a feature topic, it's more likely infrastructure or a dependency
-  of a specific topic than "miscellaneous." If you're tempted to create a
-  catch-all, re-examine each file in it and assign it properly.
-- **Renames/moves**: if a file was renamed as part of a larger change, keep
-  it with that change. If it's a standalone rename, it can be its own topic.
+**How to determine which topic a function belongs to — import tracing:**
 
-#### What NOT to split
+1. Identify leaf files (routes, CLI commands, feature modules) — these are
+   consumers. Group them into candidate topics.
+2. For each consumer, use `find-symbol` to trace which functions it imports
+   from shared/adapter/bridge files.
+3. Assign each consumed function's hunk to the consumer's topic.
+4. Functions consumed by multiple topics → shared infrastructure topic.
+5. Functions consumed by no file in this diff → group by feature domain.
+   For example, 14 functions named `get_forecast_*`, `save_cube_data_*`
+   form a "forecast adapter" topic. A separate set named `clone_brand_*`,
+   `trim_cube_*` form a different topic. Do NOT lump unreferenced functions
+   into one catch-all group.
+6. Preamble hunks (file-level imports) → earliest topic in dependency order.
 
-Some changes must stay as one topic even if they're large:
+Run this BEFORE finalizing topics. If you classify adapter.py as one topic
+first and check consumers later, you'll miss the split.
 
-- **Atomic refactorings**: a rename or move touching many files is one
-  logical change. Splitting it leaves the codebase broken between PRs.
-- **Generated code updates**: proto regeneration, CRD updates, mock
-  regeneration — keep with the change that triggered them.
-- **Dependency updates**: `go.mod` + `vendor/`, `package.json` +
-  `package-lock.json`, `pyproject.toml` + `uv.lock` are one unit.
-- **Tightly coupled changes**: if changes don't make sense independently
-  or would break the build when separated, they're one topic.
-- **Bulk imports / vendored copies / shims**: many new files that are
-  verbatim (or near-verbatim) copies from another repo or codebase.
-  Common patterns: directories named `_legacy/`, `_shims/`, `vendor/`,
-  or a batch of new files that mirror an existing external structure.
-  Keep as one topic — splitting them is pointless since they aren't
-  written by the author and don't need line-by-line review. Mark the
-  PR description with: "Verbatim copies from [source]. Verify by
-  diffing against the source rather than reviewing individually."
+"Same file" and "shared imports" are not evidence of tight coupling. Tight
+coupling means function A calls function B's internals, or they modify the
+same data structure in coordinated ways.
 
-When a topic is large because of these reasons, mark it with a note
-explaining why it can't be split. The size threshold is a guideline,
-not a hard rule.
+### Step 5: Classify hunks into topics
 
-#### Common split patterns to recognize
+Group hunks into semantic topics — coherent units of work a reviewer would
+understand as one logical change.
 
-When analyzing, look for these recurring structures:
+**Good:** "Add user auth middleware", "Refactor connection pooling"
+**Bad:** "Backend changes", "Various fixes"
 
-- **Refactoring + Feature**: extract interface first (PR 1), then add
-  new implementation using it (PR 2)
-- **Multi-layer feature**: data models (PR 1) → business logic (PR 2)
-  → API endpoints (PR 3) → UI (PR 4)
-- **Package restructuring**: create new structure (PR 1) → move code
-  (PR 2) → update imports (PR 3) → clean up old structure (PR 4)
+Guidelines:
+- **By purpose, not by file.** A feature touching models, API, tests, and
+  frontend is one topic if it serves one purpose.
+- **Shared infrastructure** serving multiple topics becomes its own topic
+  with `is_shared: true`.
+- **Renames/moves:** keep with the larger change, or standalone topic if
+  that's all the change is.
 
-These patterns produce natural topic boundaries and dependency ordering.
+#### What stays atomic
 
-### Step 5: Identify dependencies
+Some changes must stay as one topic even when large:
+
+- **Atomic refactorings:** rename touching 50 files is one change.
+- **Generated code:** proto regeneration, mock updates — keep with trigger.
+- **Lockfiles:** `pyproject.toml` + `uv.lock` are one unit.
+- **Truly coupled code:** function A calls B's internals, or they modify
+  the same data structure in coordinated ways.
+
+Mark oversized-but-unsplittable topics with a note explaining why.
+
+#### Common patterns
+
+- **Refactoring + Feature:** extract interface (PR 1) → add implementation (PR 2)
+- **Multi-layer:** models → logic → API → UI
+- **Restructuring:** new structure → move code → update imports → cleanup
+
+### Step 6: Identify dependencies
 
 For each pair of topics, determine if one depends on the other:
-- Topic B **depends on** topic A if B's code imports, calls, or references
-  something that A introduces or modifies
-- Shared infrastructure topics are typically dependencies of other topics
-- If two topics modify the same file but different parts, they may be
-  independent (just touching the same file isn't a dependency)
-- If two topics modify the same lines or closely interacting code, they
-  likely have a dependency or should be merged
+- B **depends on** A if B imports, calls, or references something A introduces
+- Shared infrastructure topics are typically dependencies
+- Same file, different parts → may be independent
+- Same lines or closely interacting code → dependency or merge
 
-Use the Python DAG to validate as you go. Write discovery state to
-`$RUN/discovery.json` and then check sizes:
+### Step 7: Check sizes and decompose
 
 ```bash
-split-pr-tools check-sizes $RUN/diff.txt $RUN/discovery.json <threshold>
+split-pr-tools check-sizes $RUN/diff.txt $RUN/discovery.json <threshold> --hunks $RUN/hunks.json
 ```
 
-### Step 6: Check sizes and decompose
+For each oversized topic: read its hunks, identify sub-topics, decompose,
+re-check. Repeat up to 3 levels deep.
 
-After initial classification, check each topic's size against the threshold:
+If hunks resist clean classification:
+- Utility used by multiple topics → shared topic
+- Two topics modifying the same function → merge them
+- Two hunks in the same function for different purposes → assign each to
+  its primary topic, note the dependency
+
+### Step 8: Write output and validate
+
+Use `assign-hunks` to write `discovery.json`. Do NOT write it manually.
 
 ```bash
-split-pr-tools check-sizes $RUN/diff.txt $RUN/discovery.json <threshold>
+split-pr-tools assign-hunks $RUN/hunks.json $RUN/discovery.json \
+  --bulk-topic "legacy-shims" --bulk-path "_legacy/_shims/" \
+  --topic "forecast-adapter:scope:get_versions_adapter,fill_in_otb_adapter,..." \
+  --topic "manage-cubes:scope:clone_brand_adapter,trim_cube_adapter,..." \
+  --topic "config:path:config.py,pyproject.toml,.gitignore,uv.lock" \
+  --topic "database:path:database/" \
+  --topic "caching:path:caching/" \
+  --topic "auth:path:auth/" \
+  --topic "forecast-routes:path:inseason/forecast/" \
+  --topic "manage-cubes-routes:path:inseason/manage_cubes/" \
+  --remainder "other" \
+  --dep "config:database" \
+  --dep "database:caching"
 ```
 
-This reports any oversized topics with their line count, hunk count, and file count.
+Note how the adapter file is split by **scope** (function name) into separate
+topics, while route/endpoint files are split by **path**. This is the key
+pattern for multi-concern files.
 
-For each oversized topic:
-1. Read its hunks more carefully
-2. Identify sub-topics within it
-3. Use `dag.split_topic()` to decompose it
-4. Re-check sizes
+**Assignment formats:**
+- `"name:scope:func1,func2"` — by function name
+- `"name:path:pattern1,pattern2"` — by file path
+- `"name:func1,func2"` — auto-detects paths vs scopes
 
-Repeat until all topics are under the threshold, or a topic genuinely can't
-be split further (e.g., a single large file change that's all one concern).
-Limit recursion to 3 levels deep.
+**Special flags:** `--bulk-topic`/`--bulk-path` for vendored code,
+`--remainder` for unassigned hunks.
 
-### Step 7: Handle entanglement
-
-If you find hunks that resist clean classification:
-- A utility function used by multiple topics: create a shared topic
-- Two topics that modify the same function: consider merging them
-- A hunk that's half topic-A and half topic-B: this shouldn't happen at
-  the hunk level (hunks are already atomic), but if two hunks in the same
-  function serve different purposes, assign each hunk to its primary topic
-  and note the dependency
-
-### Step 8: Validate and write output
-
-Write the output to `$RUN/discovery.json`, then validate it:
+Validate, then inspect:
 
 ```bash
 split-pr-tools validate-discovery $RUN/hunks.json $RUN/discovery.json
+split-pr-tools show-discovery $RUN/hunks.json $RUN/discovery.json
+split-pr-tools show-discovery $RUN/hunks.json $RUN/discovery.json --topic <id>
 ```
 
-This checks all hunks are assigned, no cycles exist, and prints per-topic
-stats with dependency info. If it reports INVALID, fix the issues and re-run.
+If INVALID: adjust topic patterns and re-run assign-hunks.
 
-Report the validation summary: number of topics, independent groups, any
-topics that couldn't be brought under the threshold.
+**Post-assignment adjustments** (avoids re-running assign-hunks):
+- `edit-edges` — add/remove edges: `--add "from:to"` `--remove "from:to"`
+- `merge-topics` — merge tightly coupled topics: `merge-topics <discovery> "a,b" "Name"`
+- `update-metadata` — set name, description, key_files inline or from a JSON file
+
+**Enrich metadata.** Set description and other fields per topic:
+
+```bash
+split-pr-tools update-metadata $RUN/discovery.json \
+  --set "config:description=Foundation config and dependency changes" \
+  --set "auth:description=Auth module refactoring with cached authorization"
+```
+
+Or write a metadata JSON file and pass it as a positional argument.
+
+Every topic must have a meaningful **description** — a paragraph for
+reviewers explaining what it does and why.
+
+Report: number of topics, sizes, dependencies.

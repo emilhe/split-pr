@@ -180,8 +180,8 @@ class TopicDAG:
         merge_set = set(topic_ids)
 
         # Collect external edges
-        external_deps: set[str] = set()  # things the merged topic depends on
-        external_dependents: set[str] = set()  # things that depend on merged topic
+        external_deps: set[str] = set()
+        external_dependents: set[str] = set()
 
         for tid in topic_ids:
             for pred in self._graph.predecessors(tid):

@@ -7,7 +7,7 @@
 
 **Stop letting monster PRs die in review purgatory.**
 
-A Claude Code plugin that splits large PRs into chains of small, reviewable PRs. It analyzes your diff semantically, builds a dependency DAG, verifies the split is lossless, and creates the PRs with proper base branches and merge order.
+A Claude Code plugin that splits large PRs into chains of small, reviewable PRs. It analyzes your diff semantically — using tree-sitter for per-function granularity — builds a dependency DAG, verifies the split is lossless, and creates the PRs with proper base branches and merge order.
 
 ## Install
 
@@ -23,6 +23,8 @@ A Claude Code plugin that splits large PRs into chains of small, reviewable PRs.
 /split-pr --base develop               # different base branch
 /split-pr --name fcst-mig              # custom prefix for PR titles
 /split-pr --threshold 600              # larger PRs allowed (default: 400 lines)
+/split-pr --max-files 15               # max files per PR (default: 10)
+/split-pr --bulk "_legacy/_shims/"     # skip AST analysis for vendored paths
 /split-pr --auto                       # skip interactive review
 /split-pr --pr 42                      # split an existing PR
 ```
@@ -50,20 +52,21 @@ A Claude Code plugin that splits large PRs into chains of small, reviewable PRs.
 ┌─────────────────────────────────────────────────────────────┐
 │                    split-pr-tools CLI                        │
 │                                                             │
-│  Python library: diff_parser, dag, state                    │
-│  (pure computation, zero git dependency)                    │
+│  Python library: diff_parser, analyzer, dag, state          │
+│  tree-sitter AST analysis, pure computation, zero git dep   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**AI does the thinking** (topic classification, dependency detection). **Code does the math** (DAG operations, diff parsing, lossless verification).
+**AI does the thinking** (topic classification, dependency detection). **Code does the math** (AST analysis, DAG operations, diff parsing, lossless verification).
 
 ### Key features
 
+- **Tree-sitter AST analysis** — splits large files into per-function virtual hunks, so different functions in `adapter.py` can go to different PRs
 - **Hunk-level splitting** — works with messy, entangled commits
 - **DAG-based dependencies** — independent topics can be reviewed in parallel
 - **Lossless verification** — every hunk accounted for before any PRs are created
 - **Smart grouping** — vendored code stays bundled, tests travel with the code they test
-- **Tracking issue** — auto-created checklist with merge order
+- **Tracking issue** — auto-created checklist with clickable DAG and merge order
 
 ## Local development
 
@@ -101,6 +104,7 @@ Add to `~/.claude/settings.json` for permission-free CLI calls:
 |---|---|
 | CLI | [Typer](https://typer.tiangolo.com/) |
 | Diff parsing | [unidiff](https://github.com/matiasb/python-unidiff) |
+| AST analysis | [tree-sitter](https://tree-sitter.github.io/) |
 | Graph algorithms | [NetworkX](https://networkx.org/) |
 | Package management | [uv](https://docs.astral.sh/uv/) |
 | AI orchestration | [Claude Code](https://claude.ai/code) skills + agents |
