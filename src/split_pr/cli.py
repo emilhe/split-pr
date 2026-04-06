@@ -1561,18 +1561,17 @@ def validate_discovery(
             f"{files} files{dep_str}"
         )
 
-    # Check for new multi-function files assigned entirely to one topic
-    # where the file dominates the topic's size. This catches cases where
-    # the agent assigned a large adapter/bridge file by path instead of
-    # splitting by scope (function).
+    # Check for files with per-function virtual hunks assigned entirely to
+    # one topic where the file dominates that topic's size. Virtual hunks
+    # exist specifically so each function can go to a different topic —
+    # assigning them all together defeats the mechanism.
+    # This applies to any file with virtual hunks, whether new or existing.
     topic_sizes: dict[str, int] = {}
     for hid, tid in assignments.items():
         topic_sizes[tid] = topic_sizes.get(tid, 0) + hunk_sizes.get(hid, 0)
 
     unsplit_files = []
     for file_info in hunks_data["files"]:
-        if not file_info.get("is_new", False):
-            continue
         hunks_in_file = file_info.get("hunks", [])
         virtual_hunks = [h for h in hunks_in_file if h.get("is_virtual") or h.get("original_hunk_id")]
         if len(virtual_hunks) < 10:
@@ -1584,16 +1583,15 @@ def validate_discovery(
         if len(topics_for_file) == 1:
             topic = topics_for_file.pop()
             t_size = topic_sizes.get(topic, 0)
-            # Only flag if the file is >60% of the topic's total size
             if t_size > 0 and file_size / t_size > 0.6:
                 unsplit_files.append((path, len(virtual_hunks), file_size, topic))
 
     if unsplit_files:
-        typer.echo(f"\n  WARNING: {len(unsplit_files)} new files have per-function virtual hunks "
+        typer.echo(f"\n  WARNING: {len(unsplit_files)} files have per-function virtual hunks "
                    "but are assigned entirely to one topic:")
         for path, count, fsize, topic in unsplit_files:
             typer.echo(f"    {path}: {count} functions, {fsize} lines, all in '{topic}'")
-        typer.echo("  These files were split by tree-sitter so each function can go to a different topic.")
+        typer.echo("  These were split by tree-sitter so each function can go to a different topic.")
         typer.echo("  Use show-hunks --file <path> to see functions, then assign by scope.")
 
     # Summary
