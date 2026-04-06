@@ -316,12 +316,17 @@ If INVALID: adjust topic patterns and re-run assign-hunks.
 - `merge-topics` — merge tightly coupled topics: `merge-topics <discovery> "a,b" "Name"`
 - `update-metadata` — set name, description, intent, key_files from a JSON file
 
-**Enrich metadata.** Write a metadata JSON file (use the Write tool) with
-`name`, `description`, `intent`, `is_shared`, and `key_files` per topic. Then:
+**Enrich metadata.** Set intent, description, and other fields per topic:
 
 ```bash
-split-pr-tools update-metadata $RUN/discovery.json $RUN/metadata.json
+split-pr-tools update-metadata $RUN/discovery.json \
+  --set "config:intent=scaffolding" \
+  --set "config:description=Foundation config and dependency changes" \
+  --set "auth:intent=behavioral" \
+  --set "auth:description=Auth module refactoring with cached authorization"
 ```
+
+Or write a metadata JSON file and pass it as a positional argument.
 
 Every topic must have:
 - A meaningful **description** — a paragraph for reviewers explaining what

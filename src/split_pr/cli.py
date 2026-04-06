@@ -599,46 +599,81 @@ def show_discovery(
 @app.command(name="update-metadata")
 def update_metadata(
     discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
-    metadata_file: Path = typer.Argument(..., help="Path to metadata JSON"),
+    metadata_file: Path = typer.Argument(None, help="Path to metadata JSON (optional if using --set)"),
+    sets: list[str] = typer.Option([], "--set", "-s",
+        help="Inline metadata: 'topic:field=value' (repeatable)"),
 ) -> None:
-    """Update topic metadata in discovery.json from a metadata file.
+    """Update topic metadata in discovery.json.
 
-    The metadata file should contain a JSON object mapping topic IDs to
-    their metadata updates. Supported fields: name, description, is_shared,
-    key_files. Only provided fields are updated; missing fields are left
-    unchanged.
+    Two modes:
+    1. From a file: update-metadata discovery.json metadata.json
+    2. Inline:      update-metadata discovery.json --set "config:intent=scaffolding"
+                    --set "config:description=Foundation config changes"
 
-    Example metadata file:
-        {
-          "forecast-adapter": {
-            "name": "Forecast adapter layer",
-            "description": "Bridges Pydantic models to legacy functions...",
-            "intent": "behavioral",
-            "is_shared": false,
-            "key_files": [
-              {"path": "adapter.py", "note": "14 adapter functions"}
-            ]
-          }
-        }
+    Supported fields: name, description, intent, is_shared.
+    Both modes can be combined. --set values override file values.
+
+    Example --set usage:
+        --set "config:intent=scaffolding"
+        --set "config:description=Foundation config and dependency changes"
+        --set "auth:intent=behavioral"
+        --set "auth:name=Auth module refactoring"
     """
     discovery = json.loads(discovery_file.read_text())
-    metadata = json.loads(metadata_file.read_text())
-
     topics = discovery.get("dag", {}).get("topics", {})
-    updated = 0
+    updated = set()
     skipped = []
 
-    for topic_id, updates in metadata.items():
+    # Apply file-based metadata if provided
+    if metadata_file:
+        metadata = json.loads(metadata_file.read_text())
+        for topic_id, updates in metadata.items():
+            if topic_id not in topics:
+                skipped.append(topic_id)
+                continue
+            for field_name in ("name", "description", "is_shared", "key_files", "intent"):
+                if field_name in updates:
+                    topics[topic_id][field_name] = updates[field_name]
+            updated.add(topic_id)
+
+    # Apply inline --set overrides
+    for spec in sets:
+        # Format: "topic:field=value"
+        colon_idx = spec.find(":")
+        if colon_idx < 0:
+            typer.echo(f"ERROR: invalid --set '{spec}' — expected 'topic:field=value'", err=True)
+            raise typer.Exit(1)
+        topic_id = spec[:colon_idx]
+        rest = spec[colon_idx + 1:]
+        eq_idx = rest.find("=")
+        if eq_idx < 0:
+            typer.echo(f"ERROR: invalid --set '{spec}' — expected 'topic:field=value'", err=True)
+            raise typer.Exit(1)
+        field_name = rest[:eq_idx]
+        value = rest[eq_idx + 1:]
+
         if topic_id not in topics:
             skipped.append(topic_id)
             continue
-        for field_name in ("name", "description", "is_shared", "key_files", "intent"):
-            if field_name in updates:
-                topics[topic_id][field_name] = updates[field_name]
-        updated += 1
+        if field_name not in ("name", "description", "is_shared", "key_files", "intent"):
+            typer.echo(f"ERROR: unknown field '{field_name}' — expected name/description/intent/is_shared/key_files", err=True)
+            raise typer.Exit(1)
+
+        # Parse boolean/json for specific fields
+        if field_name == "is_shared":
+            value = value.lower() in ("true", "1", "yes")
+        elif field_name == "key_files":
+            value = json.loads(value)
+
+        topics[topic_id][field_name] = value
+        updated.add(topic_id)
+
+    if not metadata_file and not sets:
+        typer.echo("ERROR: provide a metadata file or --set flags", err=True)
+        raise typer.Exit(1)
 
     discovery_file.write_text(json.dumps(discovery, indent=2))
-    typer.echo(f"Updated {updated} topics in {discovery_file}")
+    typer.echo(f"Updated {len(updated)} topics in {discovery_file}")
     if skipped:
         typer.echo(f"Skipped (not found): {', '.join(skipped)}")
 
