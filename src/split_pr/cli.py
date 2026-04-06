@@ -642,6 +642,16 @@ def update_metadata(
     if skipped:
         typer.echo(f"Skipped (not found): {', '.join(skipped)}")
 
+    # Warn about topics still missing intent
+    valid_intents = {"scaffolding", "mechanical", "behavioral", "tests", "cleanup"}
+    missing_intent = [
+        tid for tid, t in topics.items()
+        if not t.get("intent")
+    ]
+    if missing_intent:
+        typer.echo(f"WARNING: {len(missing_intent)} topics still missing intent: "
+                   f"{', '.join(missing_intent)}")
+
 
 @app.command(name="assign-hunks")
 def assign_hunks(
@@ -791,8 +801,9 @@ def assign_hunks(
         if len(unassigned) > 10:
             typer.echo(f"    ... and {len(unassigned) - 10} more")
 
-    # Build edges: "from:to" or "from:to:hard|soft" or "from:to:hard|soft:reason text"
+    # Build edges: "from:to:hard|soft:reason text" (constraint and reason required)
     edges = []
+    edges_missing_metadata = []
     for dep_spec in deps:
         parts = dep_spec.split(":", 3)
         if len(parts) >= 2:
@@ -805,7 +816,14 @@ def assign_hunks(
                 edge["reason"] = parts[3]
             else:
                 edge["reason"] = ""
+            if len(parts) < 4:
+                edges_missing_metadata.append(f"{parts[0]}:{parts[1]}")
             edges.append(edge)
+    if edges_missing_metadata:
+        typer.echo(f"\n  WARNING: {len(edges_missing_metadata)} edges missing constraint/reason. "
+                   f"Use format --dep 'from:to:hard|soft:reason text'", err=True)
+        for e in edges_missing_metadata:
+            typer.echo(f"    {e}", err=True)
 
     # Write discovery.json
     discovery = {
@@ -1576,6 +1594,38 @@ def validate_discovery(
             f"  {tid}{intent_str}: {len(topic_hunks)} hunks, {size} lines, "
             f"{files} files{dep_str}"
         )
+
+    # Check for missing intent on topics
+    valid_intents = {"scaffolding", "mechanical", "behavioral", "tests", "cleanup"}
+    missing_intent = []
+    for tid in order:
+        topic_meta_check = discovery["dag"]["topics"].get(tid, {})
+        intent = topic_meta_check.get("intent", "")
+        if not intent:
+            missing_intent.append(tid)
+        elif intent not in valid_intents:
+            typer.echo(f"  WARNING: topic '{tid}' has unknown intent '{intent}' "
+                       f"(expected: {', '.join(sorted(valid_intents))})")
+    if missing_intent:
+        typer.echo(f"\n  WARNING: {len(missing_intent)} topics missing intent classification. "
+                   f"Use update-metadata to set intent (scaffolding/mechanical/behavioral/tests/cleanup):")
+        for tid in missing_intent:
+            typer.echo(f"    {tid}")
+
+    # Check for missing constraint/reason on edges
+    edges_no_constraint = []
+    edges_no_reason = []
+    for e in edge_list:
+        label = f"{e['from']} -> {e['to']}"
+        if not e.get("constraint"):
+            edges_no_constraint.append(label)
+        if not e.get("reason"):
+            edges_no_reason.append(label)
+    if edges_no_reason:
+        typer.echo(f"\n  WARNING: {len(edges_no_reason)} edges missing reason. "
+                   f"Use edit-edges --add 'from:to:hard|soft:reason' to fix:")
+        for label in edges_no_reason:
+            typer.echo(f"    {label}")
 
     # Summary
     if not missing and not extra:
