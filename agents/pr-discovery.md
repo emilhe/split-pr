@@ -106,7 +106,8 @@ bit of merge latency; a false soft edge can produce a broken prefix.
 
 ## Output
 
-Write your output to `$RUN/discovery.json` with this structure:
+The `assign-hunks` command in Step 8 produces `$RUN/discovery.json`.
+**Do NOT write this file manually.** The schema below documents the format:
 
 ```json
 {
@@ -179,13 +180,14 @@ function names and file paths to IDs automatically.
 
 ### Step 3: Tag generated/vendor code
 
-Tag hunks from generated or vendored paths. These don't count toward size
-thresholds and travel with the topic that caused them to change:
+The caller specifies bulk/vendored paths via `--bulk-path` in `assign-hunks`.
+These hunks don't count toward size thresholds and travel with the topic
+that caused them to change.
 
-- `vendor/`, `node_modules/`, `_legacy/_shims/`
-- `*.pb.go`, `*_pb2.py`, `zz_generated*`
-- `package-lock.json`, `yarn.lock`, `uv.lock`
-- Files with `// Code generated` or `# AUTO-GENERATED` headers
+Also watch for generated code the caller may not have flagged:
+lockfiles (`uv.lock`, `yarn.lock`), codegen output (`*_pb2.py`, `*.pb.go`,
+`zz_generated*`), and files with `// Code generated` or `# AUTO-GENERATED`
+headers.
 
 ### Step 4: Trace function usage in multi-concern files
 
@@ -252,22 +254,9 @@ Mark oversized-but-unsplittable topics with a note explaining why.
 
 ### Step 6: Identify dependencies
 
-For each pair of topics, determine if one depends on the other. Assign a
-**constraint type** and a **reason** to every edge.
-
-Ask: "If I merge the dependent before the dependency, will the prefix
-build/typecheck/pass tests?" If yes → soft. If no → hard.
-
-Common hard edges:
-- B imports, calls, or references something A introduces → **hard**
-- B changes callers of an API that A modifies → **hard**
-- Shared infrastructure topics are hard dependencies of consumers
-
-Common soft edges:
-- Same feature domain, but independent at build level → **soft**
-- Same reviewer area → **soft**
-- Same file, different parts, no symbol dependency → **soft**
-- Same lines or closely interacting code → likely hard, or merge the topics
+For each pair of topics, determine if one depends on the other per the
+**Dependency Edges** section above. Every `--dep` flag must include a
+constraint (hard/soft) and a reason.
 
 ### Step 7: Check sizes and decompose
 
@@ -322,23 +311,13 @@ split-pr-tools show-discovery $RUN/hunks.json $RUN/discovery.json --edges
 
 If INVALID: adjust topic patterns and re-run assign-hunks.
 
-**Adjust edges after assignment.** If you need to add or remove edges after
-running `assign-hunks` (and don't want to re-run it and lose metadata):
+**Post-assignment adjustments** (avoids re-running assign-hunks):
+- `edit-edges` — add/remove edges: `--add "from:to:hard:reason"` `--remove "from:to"`
+- `merge-topics` — merge tightly coupled topics: `merge-topics <discovery> "a,b" "Name"`
+- `update-metadata` — set name, description, intent, key_files from a JSON file
 
-```bash
-split-pr-tools edit-edges $RUN/discovery.json \
-  --add "config:database:hard:config defines DB_POOL_SIZE used by database" \
-  --remove "auth:logging"
-```
-
-**Merge topics.** If two topics are too tightly coupled and should be one:
-
-```bash
-split-pr-tools merge-topics $RUN/discovery.json "auth,auth-tests" "Authentication"
-```
-
-**Enrich metadata.** Write a JSON file with `name`, `description`,
-`intent`, `is_shared`, and `key_files` per topic (use the Write tool). Then:
+**Enrich metadata.** Write a metadata JSON file (use the Write tool) with
+`name`, `description`, `intent`, `is_shared`, and `key_files` per topic. Then:
 
 ```bash
 split-pr-tools update-metadata $RUN/discovery.json $RUN/metadata.json

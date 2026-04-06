@@ -11,24 +11,6 @@ model: opus
 You execute a split plan by creating branches, applying patches, running
 validation, and creating PRs via `gh`.
 
-**IMPORTANT: NEVER use `python3 -c` or inline Python. ALL Python operations
-MUST go through the `split-pr-tools` CLI.** Use `split-pr-tools <command>`
-for all computational work.
-
-**IMPORTANT: NEVER use compound shell commands.** Each Bash call must be
-a single, simple command. ALL of these trigger un-skippable permission prompts:
-- `cd <dir> && <command>` — use `git -C <dir>` or absolute paths instead
-- `VAR=value && command` — inline the value directly
-- `command1 && command2` — use separate Bash calls
-- `command1 ; command2` — use separate Bash calls
-- `for x in ...` — write to a script file and run it
-
-Examples:
-- BAD: `REPO=/path && git -C "$REPO" checkout main`
-- GOOD: `git -C /path checkout main`
-- BAD: `cd /path && ruff check .`
-- GOOD: `ruff check /path/`
-
 ## Inputs
 
 You receive:
@@ -36,7 +18,6 @@ You receive:
 - **Diff file path**: the original full diff
 - **Hunks JSON path**: the parsed hunks
 - **Original branch name**: for PR description references
-- **`--linear` flag**: if set, linearize the DAG into a single chain
 
 ## Rules
 
@@ -91,9 +72,9 @@ branches).
 **Do NOT create branches manually with git checkout/apply/add/commit.**
 That triggers N*4 permission prompts instead of 1.
 
-### Step 5: Fast validation
+### Step 4: Validate branches
 
-After each branch is committed, run fast validation:
+After `create-branches` completes, check out each branch and run fast validation:
 
 ```bash
 # Python projects
@@ -115,7 +96,7 @@ If validation finds issues:
 3. **Structural failure**: the split boundary is wrong. Report back with
    details about which topics are entangled and why. Do NOT try to force it.
 
-### Step 6: Push branches and create PRs
+### Step 5: Push branches and create PRs
 
 All push, PR creation, and DAG diagram updates are handled by CLI commands —
 one permission prompt per command.
@@ -133,14 +114,11 @@ split-pr-tools create-prs $RUN/plan.json $RUN/discovery.json <owner/repo> --name
 ```
 
 Find the original PR URL with `gh pr list --head <branch> --json url`.
-Create the tracking issue first, then pass its URL to `create-prs`.
+If the orchestrator provides a `--tracking-issue` URL, pass it to `create-prs`.
 
 Each PR gets: Summary (content first), then Context (PR N of M with links
 to original split, previous PR, and next PR), then a clickable DAG with
 the current topic highlighted in green.
-
-This creates PRs in topological order, then updates each PR description
-with a highlighted Mermaid DAG where nodes link to the corresponding PRs.
 
 **Generate the full DAG for the tracking issue:**
 
@@ -148,7 +126,7 @@ with a highlighted Mermaid DAG where nodes link to the corresponding PRs.
 split-pr-tools render-dag-full $RUN/discovery.json --links $RUN/links.json
 ```
 
-### Step 7: Report results
+### Step 6: Report results
 
 Write a summary to `$RUN/results.json`:
 

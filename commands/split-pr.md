@@ -5,8 +5,7 @@ description: >
   Use when the user says "/split-pr", asks to split a PR, or wants to break
   a large branch into smaller pieces. Accepts optional arguments:
   --base <branch> (default: main), --threshold <lines> (default: 400),
-  --max-files <n> (default: 10), --auto (skip interactive reviews),
-  --dag (use DAG-based branching instead of default linear chain).
+  --max-files <n> (default: 10), --auto (skip interactive reviews).
 user-invocable: true
 allowed-tools:
   - Bash(split-pr-tools *)
@@ -85,7 +84,6 @@ Parse the user's input after `/split-pr` for these optional flags:
 | `--threshold <n>` | `400` | Max lines per split PR |
 | `--max-files <n>` | `10` | Max files per split PR |
 | `--auto` | off | Skip interactive review steps |
-| `--dag` | off | Use DAG-based branching (parallel review, but PRs may not pass tests individually) |
 | `--name <label>` | branch name (truncated to 20 chars) | Short label for PR title prefix |
 | `--pr <number>` | none | Analyze an existing PR instead of current branch |
 | `--bulk <paths>` | none | Comma-separated path patterns for vendored/bulk code (skips AST analysis) |
@@ -223,20 +221,11 @@ Launch the `pr-splitter` agent **in a worktree** to execute the plan.
 
 Pass it:
 - The run directory: `$RUN`
-- Whether to use DAG branching: `--dag` flag (default is linear)
 - The `--name` label (for PR title prefix)
 - The original branch name (for reference in PR descriptions)
 
-The agent works in an isolated worktree, creates branches, applies patches,
-validates, and creates PRs.
-
-After branch creation, verify the result matches the original:
-
-```bash
-split-pr-tools verify-git $RUN/plan.json <repo_dir> <original_branch>
-```
-
-If this fails, the split lost or altered changes — DO NOT proceed to PR creation.
+The agent creates branches, validates, pushes, and creates PRs. It runs
+`verify-git` internally to confirm the split is lossless before pushing.
 
 ### Phase 7: Report
 
