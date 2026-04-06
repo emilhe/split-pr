@@ -1253,6 +1253,71 @@ def verify_git(
         raise typer.Exit(1)
 
 
+@app.command(name="verify-chain")
+def verify_chain(
+    plan_file: Path = typer.Argument(..., help="Path to plan JSON"),
+    repo_dir: Path = typer.Argument(..., help="Path to the git repository"),
+    base: str = typer.Argument("main", help="Base branch to merge onto"),
+) -> None:
+    """Verify that all split branches merge cleanly in sequence.
+
+    Creates a temporary branch from base, merges each split branch in
+    topological order, and reports any conflicts. Cleans up after itself.
+    Run after create-branches to validate the chain before pushing.
+    """
+    plan = json.loads(plan_file.read_text())
+    branches = plan["branches"]
+
+    if not branches:
+        typer.echo("ERROR: No branches in plan", err=True)
+        raise typer.Exit(1)
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(repo_dir)] + list(args),
+            capture_output=True, text=True,
+        )
+
+    # Remember current branch to restore later
+    current = git("rev-parse", "--abbrev-ref", "HEAD")
+    original_branch = current.stdout.strip()
+
+    # Create temp branch from base
+    temp_branch = f"_verify-chain-{os.getpid()}"
+    r = git("checkout", "-b", temp_branch, base)
+    if r.returncode != 0:
+        typer.echo(f"ERROR: checkout {base} failed: {r.stderr.strip()}", err=True)
+        raise typer.Exit(1)
+
+    failed = []
+    passed = []
+    try:
+        for i, branch in enumerate(branches, 1):
+            branch_name = branch["branch_name"]
+            topic_id = branch["topic_id"]
+            r = git("merge", "--no-edit", branch_name)
+            if r.returncode != 0:
+                failed.append((topic_id, branch_name, r.stderr.strip()))
+                # Abort the failed merge and continue
+                git("merge", "--abort")
+                typer.echo(f"  [{i}/{len(branches)}] CONFLICT: {topic_id}")
+            else:
+                passed.append(topic_id)
+                typer.echo(f"  [{i}/{len(branches)}] OK: {topic_id}")
+    finally:
+        # Clean up: go back to original branch, delete temp
+        git("checkout", original_branch)
+        git("branch", "-D", temp_branch)
+
+    if failed:
+        typer.echo(f"\nFAILED: {len(failed)} branches had merge conflicts:")
+        for tid, bname, err in failed:
+            typer.echo(f"  {tid} ({bname}): {err[:200]}")
+        raise typer.Exit(1)
+    else:
+        typer.echo(f"\nVERIFIED: All {len(passed)} branches merge cleanly in sequence.")
+
+
 @app.command(name="push-branches")
 def push_branches(
     plan_file: Path = typer.Argument(..., help="Path to plan JSON"),

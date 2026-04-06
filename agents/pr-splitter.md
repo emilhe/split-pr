@@ -74,7 +74,16 @@ That triggers N*4 permission prompts instead of 1.
 
 ### Step 4: Validate branches
 
-After `create-branches` completes, check out each branch and run fast validation:
+**Verify the chain merges cleanly** (one command, no manual git merge):
+
+```bash
+split-pr-tools verify-chain $RUN/plan.json <repo_dir> <base>
+```
+
+This merges all branches in sequence on a temp branch and reports conflicts.
+**Do NOT run `git merge` manually** — that triggers per-branch permission prompts.
+
+**Run fast linting** on each branch:
 
 ```bash
 # Python projects
@@ -83,9 +92,6 @@ ruff check .        # verify clean
 
 # TypeScript projects
 tsc --noEmit
-
-# Pre-commit (if available and fast)
-pre-commit run --all-files
 ```
 
 If validation finds issues:

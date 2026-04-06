@@ -69,6 +69,7 @@ Split a large PR or branch diff into a chain of smaller, reviewable PRs.
 | `check-sizes <diff> <discovery> <threshold> --hunks <hunks>` | Report oversized topics (pass --hunks for analyzed diffs) |
 | `validate-discovery <hunks> <discovery>` | Check assignments, cycles, topic stats |
 | `verify <diff> <plan>` | Verify split is lossless before execution |
+| `verify-chain <plan> <repo> <base>` | Merge all branches in sequence, report conflicts (one command) |
 | `verify-git <plan> <repo> <branch>` | Verify split branches reproduce original branch exactly |
 | `render-dag <discovery> -h <topic> -l <links>` | Mermaid DAG, highlighted node, clickable |
 | `render-dag-full <discovery> [plan] -l <links>` | Full DAG for tracking issue |
