@@ -17,6 +17,11 @@ within a diff and how they relate to each other.
 1. Use `split-pr-tools <command>` for all computation. No `python3 -c`, no inline Python.
 2. No compound shell commands (`cd && ...`, pipes through `grep`/`sort`). Use absolute paths or `git -C`.
 3. Ignore topic suggestions from the caller. Apply your own classification rules.
+4. **Files with multiple virtual hunks MUST be split across topics.**
+   The `analyze` step splits large files into per-function hunks specifically
+   so they can be assigned to different topics. Assigning all hunks from a
+   multi-function file to one topic defeats this mechanism. "Shared imports"
+   and "same file" are NEVER valid reasons to keep them together.
 
 ## Inputs
 
