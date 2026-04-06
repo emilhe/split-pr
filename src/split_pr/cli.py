@@ -666,7 +666,7 @@ def assign_hunks(
     remainder_topic: str = typer.Option("", "--remainder",
         help="Topic name for any unassigned hunks"),
     deps: list[str] = typer.Option([], "--dep", "-d",
-        help="Dependency edge: 'from:to' or 'from:to:hard|soft:reason'"),
+        help="Dependency edge: 'from:to:hard|soft:reason' (all 4 parts required)"),
 ) -> None:
     """Assign hunks to topics by scope name or file path — no hunk IDs needed.
 
@@ -801,29 +801,35 @@ def assign_hunks(
         if len(unassigned) > 10:
             typer.echo(f"    ... and {len(unassigned) - 10} more")
 
-    # Build edges: "from:to:hard|soft:reason text" (constraint and reason required)
+    # Build edges: "from:to:hard|soft:reason text" (all 4 parts required)
     edges = []
-    edges_missing_metadata = []
+    bad_deps = []
     for dep_spec in deps:
         parts = dep_spec.split(":", 3)
-        if len(parts) >= 2:
-            edge: dict = {"from": parts[0], "to": parts[1]}
-            if len(parts) >= 3:
-                edge["constraint"] = parts[2]
-            else:
-                edge["constraint"] = "hard"
-            if len(parts) >= 4:
-                edge["reason"] = parts[3]
-            else:
-                edge["reason"] = ""
-            if len(parts) < 4:
-                edges_missing_metadata.append(f"{parts[0]}:{parts[1]}")
-            edges.append(edge)
-    if edges_missing_metadata:
-        typer.echo(f"\n  WARNING: {len(edges_missing_metadata)} edges missing constraint/reason. "
-                   f"Use format --dep 'from:to:hard|soft:reason text'", err=True)
-        for e in edges_missing_metadata:
-            typer.echo(f"    {e}", err=True)
+        if len(parts) < 4 or parts[2] not in ("hard", "soft") or not parts[3].strip():
+            bad_deps.append(dep_spec)
+            continue
+        edges.append({
+            "from": parts[0],
+            "to": parts[1],
+            "constraint": parts[2],
+            "reason": parts[3],
+        })
+    if bad_deps:
+        typer.echo(
+            f"\nERROR: {len(bad_deps)} --dep flags missing required constraint/reason.\n"
+            f"Required format: --dep 'from:to:hard|soft:reason text'\n"
+            f"  hard = build-breaking dependency (imports, shared types)\n"
+            f"  soft = co-location preference (same domain, same reviewer)\n"
+            f"\nRejected:", err=True)
+        for d in bad_deps:
+            typer.echo(f"    {d}", err=True)
+        typer.echo(
+            f"\nExamples:\n"
+            f"  --dep 'config:database:hard:database imports connection settings from config'\n"
+            f"  --dep 'auth:logging:soft:same observability domain, review together'",
+            err=True)
+        raise typer.Exit(1)
 
     # Write discovery.json
     discovery = {
@@ -851,7 +857,7 @@ def assign_hunks(
 def edit_edges(
     discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
     add: list[str] = typer.Option([], "--add", "-a",
-        help="Add edge: 'from:to:hard|soft:reason'"),
+        help="Add edge: 'from:to:hard|soft:reason' (all 4 parts required)"),
     remove: list[str] = typer.Option([], "--remove", "-r",
         help="Remove edge: 'from:to'"),
 ) -> None:
@@ -889,24 +895,30 @@ def edit_edges(
     added = 0
     for spec in add:
         parts = spec.split(":", 3)
-        if len(parts) < 2:
-            typer.echo(f"ERROR: invalid add spec '{spec}'", err=True)
+        if len(parts) < 4 or parts[2] not in ("hard", "soft") or not parts[3].strip():
+            typer.echo(
+                f"ERROR: invalid --add spec '{spec}'\n"
+                f"Required format: 'from:to:hard|soft:reason text'",
+                err=True)
             raise typer.Exit(1)
         from_id, to_id = parts[0], parts[1]
         for tid in (from_id, to_id):
             if tid not in topics:
                 typer.echo(f"ERROR: topic '{tid}' not found", err=True)
                 raise typer.Exit(1)
-        edge: dict = {"from": from_id, "to": to_id}
-        edge["constraint"] = parts[2] if len(parts) >= 3 else "hard"
-        edge["reason"] = parts[3] if len(parts) >= 4 else ""
+        edge: dict = {
+            "from": from_id,
+            "to": to_id,
+            "constraint": parts[2],
+            "reason": parts[3],
+        }
         # Check for duplicate
         if any(e["from"] == from_id and e["to"] == to_id for e in edges):
             typer.echo(f"  WARNING: edge {from_id} -> {to_id} already exists, replacing")
             edges = [e for e in edges if not (e["from"] == from_id and e["to"] == to_id)]
         edges.append(edge)
         added += 1
-        typer.echo(f"  Added: {from_id} -> {to_id} [{edge['constraint']}]")
+        typer.echo(f"  Added: {from_id} -> {to_id} [{edge['constraint']}] {edge['reason']}")
 
     # Validate: rebuild DAG to check for cycles
     discovery["dag"]["edges"] = edges
