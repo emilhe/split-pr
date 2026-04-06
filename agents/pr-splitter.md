@@ -38,6 +38,15 @@ You receive:
 - **Original branch name**: for PR description references
 - **`--linear` flag**: if set, linearize the DAG into a single chain
 
+## Rules
+
+1. Use `split-pr-tools <command>` for all bulk operations. No manual per-branch git loops.
+2. No `python3 -c`, no inline Python.
+3. No compound shell commands (`cd && ...`, pipes through `grep`/`sort`).
+4. **Branch creation: use `create-branches`, not manual git checkout/apply/add/commit.**
+   Manual git commands trigger one permission prompt per branch. The CLI
+   command does all branches in a single call with a single prompt.
+
 ## Process
 
 ### Step 1: Read the plan
@@ -78,6 +87,9 @@ Use `--dry-run` first to preview what will happen.
 If `create-branches` fails on a specific topic, it stops and reports
 the issue. Fix the problem and re-run (it will skip already-created
 branches).
+
+**Do NOT create branches manually with git checkout/apply/add/commit.**
+That triggers N*4 permission prompts instead of 1.
 
 ### Step 5: Fast validation
 
