@@ -61,7 +61,7 @@ A Claude Code plugin that splits large PRs into chains of small, reviewable PRs.
 
 ### Key features
 
-- **Tree-sitter AST analysis** — splits large files into per-function virtual hunks, so different functions in `adapter.py` can go to different PRs
+- **Tree-sitter AST analysis** — splits large files into per-function virtual hunks, so different functions can go to different PRs
 - **Hunk-level splitting** — works with messy, entangled commits
 - **DAG-based dependencies** — independent topics can be reviewed in parallel
 - **Lossless verification** — every hunk accounted for before any PRs are created
