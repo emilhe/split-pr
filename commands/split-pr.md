@@ -54,10 +54,10 @@ Split a large PR or branch diff into a chain of smaller, reviewable PRs.
 | `stats <hunks> [--sort size] [--top N]` | Summary: file count, hunk count, per-file sizes |
 | `list-hunks <hunks> --detail --skip X --only X --scope X --status MOD --sort size --top N --summary` | All files with scopes, signatures, filtering, sorting |
 | `find-symbol <hunks> <name> --exact --summary` | Import tracing: find where a symbol is defined and who references it |
-| `show-discovery <hunks> <discovery> --topic X --sort size --only X --skip X --edges` | Topic summary with real sizes, or drill into one topic's files. --edges shows all edges with constraint/reason |
+| `show-discovery <hunks> <discovery> --topic X --sort size --only X --skip X` | Topic summary with real sizes, or drill into one topic's files |
 | `update-metadata <discovery> [metadata.json] --set "topic:field=value"` | Update topic metadata inline or from a JSON file |
 | `assign-hunks <hunks> <output> --topic X --bulk-topic X --dep X` | Assign hunks to topics by scope/path (no IDs needed) |
-| `edit-edges <discovery> --add "from:to:hard\|soft:reason" --remove "from:to"` | Add/remove edges without re-running assign-hunks |
+| `edit-edges <discovery> --add "from:to" --remove "from:to"` | Add/remove edges without re-running assign-hunks |
 | `merge-topics <discovery> "a,b" "New Name"` | Merge topics, preserving external edges and metadata |
 | `show-hunks <hunks> [ids] --file X --preview N` | Inspect hunks by ID or file path, with content preview |
 | `show-plan <plan> -v --branch X` | Plan summary with dependencies, files per branch. **Branches are in merge order.** |

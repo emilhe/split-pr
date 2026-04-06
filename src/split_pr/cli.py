@@ -460,14 +460,12 @@ def show_discovery(
     sort: str = typer.Option("", "--sort", help="Sort topics by: size (descending)"),
     only: str = typer.Option("", "--only", help="With --topic: only show files matching these patterns"),
     skip: str = typer.Option("", "--skip", help="With --topic: exclude files matching these patterns"),
-    show_edges: bool = typer.Option(False, "--edges", "-e", help="Show all edges with constraint and reason"),
 ) -> None:
     """Show discovery state: topics, sizes, and unassigned hunks.
 
     Computes real sizes from hunk data (not estimated_size). Use --topic
     to drill into one topic's files and scopes. Use --sort size to rank
     topics by size. Use --only/--skip with --topic to filter files.
-    Use --edges to list all dependency edges with their types and reasons.
     """
     hunks_data = json.loads(hunks_file.read_text())
     discovery = json.loads(discovery_file.read_text())
@@ -486,11 +484,11 @@ def show_discovery(
     all_hunk_ids = set(hunk_info.keys())
     assigned_ids = set(assignments.keys())
 
-    # Get DAG edges for dependencies (with constraint/reason)
+    # Get DAG edges for dependencies
     edges = discovery.get("dag", {}).get("edges", [])
-    dep_map: dict[str, list[dict]] = {}  # topic -> list of {from, constraint, reason}
+    dep_map: dict[str, list[str]] = {}
     for e in edges:
-        dep_map.setdefault(e["to"], []).append(e)
+        dep_map.setdefault(e["to"], []).append(e["from"])
 
     if topic:
         # Detail view for one topic
@@ -507,14 +505,8 @@ def show_discovery(
                 files.setdefault(info["file"], []).append({"id": hid, **info})
 
         deps = dep_map.get(topic, [])
-        dep_parts = [f"{d['from']}({d.get('constraint','hard')[0]})" for d in deps]
-        dep_str = f"  depends_on: {', '.join(dep_parts)}" if deps else ""
-        intent = topic_data.get("intent", "")
-        intent_str = f" [{intent}]" if intent else ""
-        typer.echo(f"{topic}{intent_str}: {len(topic_hunks)} hunks, {total_size} lines, {len(files)} files{dep_str}")
-        for d in deps:
-            if d.get("reason"):
-                typer.echo(f"  edge {d['from']} -> {topic}: {d.get('constraint','hard')} — {d['reason']}")
+        dep_str = f"  depends_on: {', '.join(deps)}" if deps else ""
+        typer.echo(f"{topic}: {len(topic_hunks)} hunks, {total_size} lines, {len(files)} files{dep_str}")
 
         # Show topic description if available
         topic_data = discovery.get("dag", {}).get("topics", {}).get(topic, {})
@@ -569,13 +561,9 @@ def show_discovery(
             if not s:
                 continue
             deps = dep_map.get(tid, [])
-            dep_parts = [f"{d['from']}({d.get('constraint','hard')[0]})" for d in deps]
-            dep_str = f"  depends: {', '.join(dep_parts)}" if deps else ""
-            topic_data_row = discovery.get("dag", {}).get("topics", {}).get(tid, {})
-            intent = topic_data_row.get("intent", "")
-            intent_str = f" [{intent}]" if intent else ""
+            dep_str = f"  depends: {', '.join(deps)}" if deps else ""
             typer.echo(
-                f"  {tid:30}{intent_str:15} {s['hunks']:4} hunks  {s['size']:5} lines  "
+                f"  {tid:40} {s['hunks']:4} hunks  {s['size']:5} lines  "
                 f"{len(s['files']):2} files{dep_str}"
             )
 
@@ -587,13 +575,6 @@ def show_discovery(
                     scope_str = f"  scope={info['scope']}" if info["scope"] else ""
                     typer.echo(f"  {info['file']}{scope_str}  size={info['size']}")
 
-        if show_edges and edges:
-            typer.echo(f"\nEdges ({len(edges)}):")
-            for e in edges:
-                c = e.get("constraint", "hard")
-                r = e.get("reason", "")
-                reason_str = f" — {r}" if r else ""
-                typer.echo(f"  {e['from']} -> {e['to']}  [{c}]{reason_str}")
 
 
 @app.command(name="update-metadata")
@@ -631,7 +612,7 @@ def update_metadata(
             if topic_id not in topics:
                 skipped.append(topic_id)
                 continue
-            for field_name in ("name", "description", "is_shared", "key_files", "intent"):
+            for field_name in ("name", "description", "is_shared", "key_files"):
                 if field_name in updates:
                     topics[topic_id][field_name] = updates[field_name]
             updated.add(topic_id)
@@ -655,7 +636,7 @@ def update_metadata(
         if topic_id not in topics:
             skipped.append(topic_id)
             continue
-        if field_name not in ("name", "description", "is_shared", "key_files", "intent"):
+        if field_name not in ("name", "description", "is_shared", "key_files"):
             typer.echo(f"ERROR: unknown field '{field_name}' — expected name/description/intent/is_shared/key_files", err=True)
             raise typer.Exit(1)
 
@@ -677,16 +658,6 @@ def update_metadata(
     if skipped:
         typer.echo(f"Skipped (not found): {', '.join(skipped)}")
 
-    # Warn about topics still missing intent
-    valid_intents = {"scaffolding", "mechanical", "behavioral", "tests", "cleanup"}
-    missing_intent = [
-        tid for tid, t in topics.items()
-        if not t.get("intent")
-    ]
-    if missing_intent:
-        typer.echo(f"WARNING: {len(missing_intent)} topics still missing intent: "
-                   f"{', '.join(missing_intent)}")
-
 
 @app.command(name="assign-hunks")
 def assign_hunks(
@@ -701,7 +672,7 @@ def assign_hunks(
     remainder_topic: str = typer.Option("", "--remainder",
         help="Topic name for any unassigned hunks"),
     deps: list[str] = typer.Option([], "--dep", "-d",
-        help="Dependency edge: 'from:to:hard|soft:reason' (all 4 parts required)"),
+        help="Dependency edge: 'from_topic:to_topic'"),
 ) -> None:
     """Assign hunks to topics by scope name or file path — no hunk IDs needed.
 
@@ -715,8 +686,7 @@ def assign_hunks(
         --topic "database:path:database/"
         --bulk-topic "legacy-shims" --bulk-path "_legacy/_shims/"
         --remainder "misc"
-        --dep "config:database:hard:config defines DB connection settings"
-        --dep "auth:logging:soft:same observability domain"
+        --dep "config:database" --dep "database:caching"
     """
     hunks_data = json.loads(hunks_file.read_text())
 
@@ -836,35 +806,12 @@ def assign_hunks(
         if len(unassigned) > 10:
             typer.echo(f"    ... and {len(unassigned) - 10} more")
 
-    # Build edges: "from:to:hard|soft:reason text" (all 4 parts required)
+    # Build edges
     edges = []
-    bad_deps = []
     for dep_spec in deps:
-        parts = dep_spec.split(":", 3)
-        if len(parts) < 4 or parts[2] not in ("hard", "soft") or not parts[3].strip():
-            bad_deps.append(dep_spec)
-            continue
-        edges.append({
-            "from": parts[0],
-            "to": parts[1],
-            "constraint": parts[2],
-            "reason": parts[3],
-        })
-    if bad_deps:
-        typer.echo(
-            f"\nERROR: {len(bad_deps)} --dep flags missing required constraint/reason.\n"
-            f"Required format: --dep 'from:to:hard|soft:reason text'\n"
-            f"  hard = build-breaking dependency (imports, shared types)\n"
-            f"  soft = co-location preference (same domain, same reviewer)\n"
-            f"\nRejected:", err=True)
-        for d in bad_deps:
-            typer.echo(f"    {d}", err=True)
-        typer.echo(
-            f"\nExamples:\n"
-            f"  --dep 'config:database:hard:database imports connection settings from config'\n"
-            f"  --dep 'auth:logging:soft:same observability domain, review together'",
-            err=True)
-        raise typer.Exit(1)
+        parts = dep_spec.split(":")
+        if len(parts) == 2:
+            edges.append({"from": parts[0], "to": parts[1]})
 
     # Write discovery.json
     discovery = {
@@ -892,7 +839,7 @@ def assign_hunks(
 def edit_edges(
     discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
     add: list[str] = typer.Option([], "--add", "-a",
-        help="Add edge: 'from:to:hard|soft:reason' (all 4 parts required)"),
+        help="Add edge: 'from:to'"),
     remove: list[str] = typer.Option([], "--remove", "-r",
         help="Remove edge: 'from:to'"),
 ) -> None:
@@ -903,7 +850,7 @@ def edit_edges(
     that no cycles are introduced.
 
     Examples:
-        --add "config:database:hard:config defines DB settings"
+        --add "config:database"
         --remove "auth:logging"
     """
     discovery = json.loads(discovery_file.read_text())
@@ -929,31 +876,23 @@ def edit_edges(
     # Add edges
     added = 0
     for spec in add:
-        parts = spec.split(":", 3)
-        if len(parts) < 4 or parts[2] not in ("hard", "soft") or not parts[3].strip():
-            typer.echo(
-                f"ERROR: invalid --add spec '{spec}'\n"
-                f"Required format: 'from:to:hard|soft:reason text'",
-                err=True)
+        parts = spec.split(":", 1)
+        if len(parts) != 2:
+            typer.echo(f"ERROR: invalid add spec '{spec}' — expected 'from:to'", err=True)
             raise typer.Exit(1)
         from_id, to_id = parts[0], parts[1]
         for tid in (from_id, to_id):
             if tid not in topics:
                 typer.echo(f"ERROR: topic '{tid}' not found", err=True)
                 raise typer.Exit(1)
-        edge: dict = {
-            "from": from_id,
-            "to": to_id,
-            "constraint": parts[2],
-            "reason": parts[3],
-        }
+        edge: dict = {"from": from_id, "to": to_id}
         # Check for duplicate
         if any(e["from"] == from_id and e["to"] == to_id for e in edges):
             typer.echo(f"  WARNING: edge {from_id} -> {to_id} already exists, replacing")
             edges = [e for e in edges if not (e["from"] == from_id and e["to"] == to_id)]
         edges.append(edge)
         added += 1
-        typer.echo(f"  Added: {from_id} -> {to_id} [{edge['constraint']}] {edge['reason']}")
+        typer.echo(f"  Added: {from_id} -> {to_id}")
 
     # Validate: rebuild DAG to check for cycles
     discovery["dag"]["edges"] = edges
@@ -1619,60 +1558,16 @@ def validate_discovery(
 
     # Per-topic stats
     typer.echo("\nTopic hunk counts:")
-    edge_list = discovery["dag"].get("edges", [])
-    edge_lookup: dict[tuple[str, str], dict] = {
-        (e["from"], e["to"]): e for e in edge_list
-    }
     for tid in order:
         topic_hunks = [hid for hid, t in assignments.items() if t == tid]
         size = sum(hunk_sizes.get(h, 0) for h in topic_hunks)
         files = len({hunk_file_map[hid] for hid in topic_hunks if hid in hunk_file_map})
         deps = dag.get_dependencies(tid)
-        dep_parts = []
-        for d in deps:
-            e = edge_lookup.get((d, tid), {})
-            c = e.get("constraint", "hard")
-            dep_parts.append(f"{d}({c[0]})")
-        dep_str = f" (depends on: {', '.join(dep_parts)})" if dep_parts else ""
-        topic_meta_val = discovery["dag"]["topics"].get(tid, {})
-        intent = topic_meta_val.get("intent", "")
-        intent_str = f" [{intent}]" if intent else ""
+        dep_str = f" (depends on: {', '.join(deps)})" if deps else ""
         typer.echo(
-            f"  {tid}{intent_str}: {len(topic_hunks)} hunks, {size} lines, "
+            f"  {tid}: {len(topic_hunks)} hunks, {size} lines, "
             f"{files} files{dep_str}"
         )
-
-    # Check for missing intent on topics
-    valid_intents = {"scaffolding", "mechanical", "behavioral", "tests", "cleanup"}
-    missing_intent = []
-    for tid in order:
-        topic_meta_check = discovery["dag"]["topics"].get(tid, {})
-        intent = topic_meta_check.get("intent", "")
-        if not intent:
-            missing_intent.append(tid)
-        elif intent not in valid_intents:
-            typer.echo(f"  WARNING: topic '{tid}' has unknown intent '{intent}' "
-                       f"(expected: {', '.join(sorted(valid_intents))})")
-    if missing_intent:
-        typer.echo(f"\n  WARNING: {len(missing_intent)} topics missing intent classification. "
-                   f"Use update-metadata to set intent (scaffolding/mechanical/behavioral/tests/cleanup):")
-        for tid in missing_intent:
-            typer.echo(f"    {tid}")
-
-    # Check for missing constraint/reason on edges
-    edges_no_constraint = []
-    edges_no_reason = []
-    for e in edge_list:
-        label = f"{e['from']} -> {e['to']}"
-        if not e.get("constraint"):
-            edges_no_constraint.append(label)
-        if not e.get("reason"):
-            edges_no_reason.append(label)
-    if edges_no_reason:
-        typer.echo(f"\n  WARNING: {len(edges_no_reason)} edges missing reason. "
-                   f"Use edit-edges --add 'from:to:hard|soft:reason' to fix:")
-        for label in edges_no_reason:
-            typer.echo(f"    {label}")
 
     # Summary
     if not missing and not extra:
@@ -1793,21 +1688,15 @@ def render_dag(
     for tid, tdata in topics.items():
         name = tdata.get("name", tid)
         size = tdata.get("estimated_size", 0)
-        intent = tdata.get("intent", "")
-        intent_line = f"<br/><i>{intent}</i>" if intent else ""
-        label = f"{name}<br/>{size} lines{intent_line}"
+        label = f"{name}<br/>{size} lines"
         if highlight and tid == highlight:
             lines.append(f'    {tid}["{label}"]:::current')
         else:
             lines.append(f'    {tid}["{label}"]')
 
-    # Edges: solid for hard, dashed for soft
+    # Edges
     for e in edges:
-        constraint = e.get("constraint", "hard")
-        if constraint == "soft":
-            lines.append(f"    {e['from']} -.-> {e['to']}")
-        else:
-            lines.append(f"    {e['from']} --> {e['to']}")
+        lines.append(f"    {e['from']} --> {e['to']}")
 
     # Click links to PRs
     if links:
@@ -1861,23 +1750,17 @@ def render_dag_full(
     for tid, tdata in topics.items():
         name = tdata.get("name", tid)
         size = tdata.get("estimated_size", 0)
-        intent = tdata.get("intent", "")
-        intent_line = f"<br/><i>{intent}</i>" if intent else ""
         info = topic_info.get(tid)
         if info:
-            label = f"#{info['index']}/{info['total']} {name}<br/>{size} lines{intent_line}"
+            label = f"#{info['index']}/{info['total']} {name}<br/>{size} lines"
         else:
-            label = f"{name}<br/>{size} lines{intent_line}"
+            label = f"{name}<br/>{size} lines"
 
         lines.append(f'    {tid}["{label}"]')
 
-    # Edges: solid for hard, dashed for soft
+    # Edges
     for e in edges:
-        constraint = e.get("constraint", "hard")
-        if constraint == "soft":
-            lines.append(f"    {e['from']} -.-> {e['to']}")
-        else:
-            lines.append(f"    {e['from']} --> {e['to']}")
+        lines.append(f"    {e['from']} --> {e['to']}")
 
     # Find independent groups (nodes with no edges between them)
     # by checking weakly connected components

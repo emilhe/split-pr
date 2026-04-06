@@ -29,25 +29,6 @@ You receive:
 A topic is oversized if it exceeds EITHER the line threshold OR the file
 count threshold. Generated/vendor files don't count toward the file threshold.
 
-## Topic Intent Classes
-
-Every topic must be classified with one intent:
-
-| Intent | Description | Examples |
-|---|---|---|
-| **scaffolding** | Compatibility prep, new interfaces, stubs, feature flags | Add interface before implementation; add config key before use |
-| **mechanical** | Renames, moves, import rewrites, formatting — no behavioral change | Rename `getUser` → `fetchUser` across 40 files |
-| **behavioral** | Functional changes — new features, bug fixes, logic changes | Add auth middleware; fix race condition |
-| **tests** | Test-only changes — new tests, test infra, fixtures | Add integration tests for auth flow |
-| **cleanup** | Dead code removal, deprecation removal, comment cleanup | Remove unused legacy endpoint |
-
-Intent drives splitting decisions:
-- A 50-file **mechanical** rename and the **behavioral** change it enables
-  are different topics even if they touch the same feature area.
-- **scaffolding** naturally precedes **behavioral** (hard dependency).
-- **tests** follow their subject topic (same topic or soft dependency).
-- **cleanup** typically comes last in the chain.
-
 ## Hard Constraints
 
 These override all other classification guidance.
@@ -73,37 +54,6 @@ These override all other classification guidance.
    `.to_dict()` because `database/core.py` changed its return type, the
    service change belongs to the service's feature topic, not database.
 
-## Dependency Edges
-
-Every dependency edge requires a **constraint type** and a **reason**.
-
-### Hard edges (constraint: "hard")
-
-The dependent topic will not build, typecheck, or pass tests if merged
-before the dependency. These represent program-level requirements.
-
-| Pattern | Example reason |
-|---|---|
-| Symbol introduced before use | "introduces `AuthMiddleware` class imported by API topic" |
-| API before call-site migration | "changes return type that callers depend on" |
-| Schema/proto before generated code | "updates `.proto` that triggers codegen in dependent" |
-| Migration before cleanup | "removes old path; cleanup deletes the compat shim" |
-| Config before consumer | "adds config key `DB_POOL_SIZE` read by connection pool" |
-
-### Soft edges (constraint: "soft")
-
-Nice to review together or in order, but independent prefixes still build.
-
-| Pattern | Example reason |
-|---|---|
-| Same feature domain | "both touch forecast pipeline, easier to review together" |
-| Same reviewer/owner area | "same team owns both; reduces reviewer context switches" |
-| Same test surface | "share test fixtures; reviewing together avoids confusion" |
-| Co-change affinity | "historically change together; splitting risks merge conflicts" |
-
-**When unsure:** default to hard. It's safer — a false hard edge adds a
-bit of merge latency; a false soft edge can produce a broken prefix.
-
 ## Output
 
 The `assign-hunks` command in Step 8 produces `$RUN/discovery.json`.
@@ -117,7 +67,6 @@ The `assign-hunks` command in Step 8 produces `$RUN/discovery.json`.
         "id": "topic-id",
         "name": "Human readable name",
         "description": "What this topic does and why — written for a reviewer.",
-        "intent": "behavioral",
         "estimated_size": 150,
         "hunk_ids": ["abc123", "def456"],
         "is_shared": false,
@@ -127,12 +76,7 @@ The `assign-hunks` command in Step 8 produces `$RUN/discovery.json`.
       }
     },
     "edges": [
-      {
-        "from": "dependency-id",
-        "to": "dependent-id",
-        "constraint": "hard",
-        "reason": "introduces AuthMiddleware class imported by API topic"
-      }
+      {"from": "dependency-id", "to": "dependent-id"}
     ]
   },
   "assignments": {
@@ -218,20 +162,18 @@ same data structure in coordinated ways.
 ### Step 5: Classify hunks into topics
 
 Group hunks into semantic topics — coherent units of work a reviewer would
-understand as one logical change. Assign an **intent** to each topic.
+understand as one logical change.
 
-**Good:** "Add user auth middleware" (behavioral), "Rename getUser → fetchUser" (mechanical)
+**Good:** "Add user auth middleware", "Refactor connection pooling"
 **Bad:** "Backend changes", "Various fixes"
 
 Guidelines:
 - **By purpose, not by file.** A feature touching models, API, tests, and
   frontend is one topic if it serves one purpose.
-- **Split by intent when appropriate.** A mechanical rename and the behavioral
-  change it enables should be separate topics, even in the same feature area.
 - **Shared infrastructure** serving multiple topics becomes its own topic
   with `is_shared: true`.
 - **Renames/moves:** keep with the larger change, or standalone topic if
-  that's all the change is (intent: mechanical).
+  that's all the change is.
 
 #### What stays atomic
 
@@ -247,16 +189,17 @@ Mark oversized-but-unsplittable topics with a note explaining why.
 
 #### Common patterns
 
-- **Refactoring + Feature:** extract interface (scaffolding) → add implementation (behavioral)
+- **Refactoring + Feature:** extract interface (PR 1) → add implementation (PR 2)
 - **Multi-layer:** models → logic → API → UI
-- **Restructuring:** new structure (scaffolding) → move code (mechanical) → update imports (mechanical) → cleanup
-- **Rename + Use:** rename symbol (mechanical) → use new name in feature (behavioral)
+- **Restructuring:** new structure → move code → update imports → cleanup
 
 ### Step 6: Identify dependencies
 
-For each pair of topics, determine if one depends on the other per the
-**Dependency Edges** section above. Every `--dep` flag must include a
-constraint (hard/soft) and a reason.
+For each pair of topics, determine if one depends on the other:
+- B **depends on** A if B imports, calls, or references something A introduces
+- Shared infrastructure topics are typically dependencies
+- Same file, different parts → may be independent
+- Same lines or closely interacting code → dependency or merge
 
 ### Step 7: Check sizes and decompose
 
@@ -285,17 +228,13 @@ split-pr-tools assign-hunks $RUN/hunks.json $RUN/discovery.json \
   --topic "config:path:config.py,pyproject.toml,uv.lock" \
   --topic "database:path:database/" \
   --remainder "other" \
-  --dep "config:database:hard:config defines DB_POOL_SIZE used by database" \
-  --dep "forecast-adapter:manage-cubes:soft:same adapter layer, easier to review together"
+  --dep "config:database" --dep "database:caching"
 ```
 
 **Assignment formats:**
 - `"name:scope:func1,func2"` — by function name
 - `"name:path:pattern1,pattern2"` — by file path
 - `"name:func1,func2"` — auto-detects paths vs scopes
-
-**Dependency format:** `--dep "from:to:hard|soft:reason text"`
-- Constraint and reason are required for every edge.
 
 **Special flags:** `--bulk-topic`/`--bulk-path` for vendored code,
 `--remainder` for unassigned hunks.
@@ -316,21 +255,17 @@ If INVALID: adjust topic patterns and re-run assign-hunks.
 - `merge-topics` — merge tightly coupled topics: `merge-topics <discovery> "a,b" "Name"`
 - `update-metadata` — set name, description, intent, key_files from a JSON file
 
-**Enrich metadata.** Set intent, description, and other fields per topic:
+**Enrich metadata.** Set description and other fields per topic:
 
 ```bash
 split-pr-tools update-metadata $RUN/discovery.json \
-  --set "config:intent=scaffolding" \
   --set "config:description=Foundation config and dependency changes" \
-  --set "auth:intent=behavioral" \
   --set "auth:description=Auth module refactoring with cached authorization"
 ```
 
 Or write a metadata JSON file and pass it as a positional argument.
 
-Every topic must have:
-- A meaningful **description** — a paragraph for reviewers explaining what
-  it does and why.
-- An **intent** — one of: scaffolding, mechanical, behavioral, tests, cleanup.
+Every topic must have a meaningful **description** — a paragraph for
+reviewers explaining what it does and why.
 
-Report: number of topics, sizes, intents, hard/soft edges.
+Report: number of topics, sizes, dependencies.

@@ -34,7 +34,6 @@ class Topic:
     estimated_size: int = 0
     hunk_ids: list[str] = field(default_factory=list)
     is_shared: bool = False  # True if this is shared infrastructure
-    intent: str = ""  # scaffolding, mechanical, behavioral, tests, cleanup
 
     @property
     def hunk_count(self) -> int:
@@ -75,19 +74,8 @@ class TopicDAG:
         self._graph.remove_node(topic_id)
         return topic
 
-    def add_dependency(
-        self,
-        dependency_id: str,
-        dependent_id: str,
-        constraint: str = "hard",
-        reason: str = "",
-    ) -> None:
+    def add_dependency(self, dependency_id: str, dependent_id: str) -> None:
         """Add an edge: dependent_id depends on dependency_id.
-
-        Args:
-            constraint: "hard" (must precede — build breaks otherwise) or
-                        "soft" (same topic/owner area — nice but not required).
-            reason: Human-readable justification for this edge.
 
         Raises CyclicDependencyError if this would create a cycle.
         """
@@ -99,10 +87,7 @@ class TopicDAG:
             raise CyclicDependencyError([dependency_id, dependent_id])
 
         # Temporarily add the edge to check for cycles
-        self._graph.add_edge(
-            dependency_id, dependent_id,
-            constraint=constraint, reason=reason,
-        )
+        self._graph.add_edge(dependency_id, dependent_id)
         try:
             cycle = nx.find_cycle(self._graph, orientation="original")
             # Remove the edge we just added before raising
@@ -194,17 +179,17 @@ class TopicDAG:
 
         merge_set = set(topic_ids)
 
-        # Collect external edges with their metadata
-        external_deps: dict[str, dict] = {}  # dep_id -> edge attrs
-        external_dependents: dict[str, dict] = {}  # dependent_id -> edge attrs
+        # Collect external edges
+        external_deps: set[str] = set()
+        external_dependents: set[str] = set()
 
         for tid in topic_ids:
             for pred in self._graph.predecessors(tid):
-                if pred not in merge_set and pred not in external_deps:
-                    external_deps[pred] = dict(self._graph.edges[pred, tid])
+                if pred not in merge_set:
+                    external_deps.add(pred)
             for succ in self._graph.successors(tid):
-                if succ not in merge_set and succ not in external_dependents:
-                    external_dependents[succ] = dict(self._graph.edges[tid, succ])
+                if succ not in merge_set:
+                    external_dependents.add(succ)
 
         # Combine hunks and compute size
         all_hunks: list[str] = []
@@ -226,12 +211,12 @@ class TopicDAG:
         for tid in topic_ids:
             self.remove_topic(tid)
 
-        # Add merged topic with edges (preserving constraint/reason)
+        # Add merged topic with edges
         self.add_topic(merged_topic)
-        for dep, attrs in external_deps.items():
-            self.add_dependency(dep, merged_id, **attrs)
-        for dependent, attrs in external_dependents.items():
-            self.add_dependency(merged_id, dependent, **attrs)
+        for dep in external_deps:
+            self.add_dependency(dep, merged_id)
+        for dependent in external_dependents:
+            self.add_dependency(merged_id, dependent)
 
         return merged_topic
 
@@ -252,14 +237,12 @@ class TopicDAG:
 
         new_ids = {t.id for t in new_topics}
 
-        # Capture external edges with metadata before removal
-        external_deps: list[tuple[str, dict]] = [
-            (p, dict(self._graph.edges[p, topic_id]))
-            for p in self._graph.predecessors(topic_id) if p not in new_ids
+        # Capture external edges before removal
+        external_deps = [
+            p for p in self._graph.predecessors(topic_id) if p not in new_ids
         ]
-        external_dependents: list[tuple[str, dict]] = [
-            (s, dict(self._graph.edges[topic_id, s]))
-            for s in self._graph.successors(topic_id) if s not in new_ids
+        external_dependents = [
+            s for s in self._graph.successors(topic_id) if s not in new_ids
         ]
 
         self.remove_topic(topic_id)
@@ -269,15 +252,15 @@ class TopicDAG:
             self.add_topic(t)
 
         # All new sub-topics inherit the original's external dependencies
-        for dep, attrs in external_deps:
+        for dep in external_deps:
             for t in new_topics:
-                self.add_dependency(dep, t.id, **attrs)
+                self.add_dependency(dep, t.id)
 
         # All external dependents now depend on all new sub-topics
         # (conservative — the agent can prune unnecessary edges later)
-        for dependent, attrs in external_dependents:
+        for dependent in external_dependents:
             for t in new_topics:
-                self.add_dependency(t.id, dependent, **attrs)
+                self.add_dependency(t.id, dependent)
 
         # Add internal dependencies
         if internal_deps:
@@ -295,17 +278,11 @@ class TopicDAG:
                     "estimated_size": t.estimated_size,
                     "hunk_ids": t.hunk_ids,
                     "is_shared": t.is_shared,
-                    "intent": t.intent,
                 }
                 for tid, t in self._topics.items()
             },
             "edges": [
-                {
-                    "from": u,
-                    "to": v,
-                    "constraint": self._graph.edges[u, v].get("constraint", "hard"),
-                    "reason": self._graph.edges[u, v].get("reason", ""),
-                }
+                {"from": u, "to": v}
                 for u, v in self._graph.edges()
             ],
         }
@@ -325,35 +302,22 @@ class TopicDAG:
                 estimated_size=tdata.get("estimated_size", 0),
                 hunk_ids=tdata.get("hunk_ids", []),
                 is_shared=tdata.get("is_shared", False),
-                intent=tdata.get("intent", ""),
             ))
         for edge in data["edges"]:
-            dag.add_dependency(
-                edge["from"], edge["to"],
-                constraint=edge.get("constraint", "hard"),
-                reason=edge.get("reason", ""),
-            )
+            dag.add_dependency(edge["from"], edge["to"])
         return dag
 
     def summary(self) -> str:
         """Human-readable summary of the DAG."""
-        hard = sum(1 for _, _, d in self._graph.edges(data=True) if d.get("constraint", "hard") == "hard")
-        soft = self._graph.number_of_edges() - hard
-        edge_str = f"{hard} hard + {soft} soft edges" if soft else f"{self._graph.number_of_edges()} edges"
-        lines = [f"TopicDAG: {self.topic_count} topics, {edge_str}"]
+        lines = [f"TopicDAG: {self.topic_count} topics, {self._graph.number_of_edges()} dependencies"]
         groups = self.independent_groups()
         if len(groups) > 1:
             lines.append(f"  {len(groups)} independent groups (can be reviewed in parallel)")
 
         for tid in self.linearize():
             topic = self._topics[tid]
-            intent_str = f" [{topic.intent}]" if topic.intent else ""
             deps = self.get_dependencies(tid)
-            dep_parts = []
-            for d in deps:
-                c = self._graph.edges[d, tid].get("constraint", "hard")
-                dep_parts.append(f"{d}({c[0]})")  # e.g. "config(h)" or "auth(s)"
-            dep_str = f" (depends on: {', '.join(dep_parts)})" if dep_parts else " (root)"
-            lines.append(f"  [{topic.id}]{intent_str} {topic.name} ~{topic.estimated_size} lines{dep_str}")
+            dep_str = f" (depends on: {', '.join(deps)})" if deps else " (root)"
+            lines.append(f"  [{topic.id}] {topic.name} ~{topic.estimated_size} lines{dep_str}")
 
         return "\n".join(lines)
