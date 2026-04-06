@@ -245,15 +245,14 @@ Validate, then inspect:
 split-pr-tools validate-discovery $RUN/hunks.json $RUN/discovery.json
 split-pr-tools show-discovery $RUN/hunks.json $RUN/discovery.json
 split-pr-tools show-discovery $RUN/hunks.json $RUN/discovery.json --topic <id>
-split-pr-tools show-discovery $RUN/hunks.json $RUN/discovery.json --edges
 ```
 
 If INVALID: adjust topic patterns and re-run assign-hunks.
 
 **Post-assignment adjustments** (avoids re-running assign-hunks):
-- `edit-edges` — add/remove edges: `--add "from:to:hard:reason"` `--remove "from:to"`
+- `edit-edges` — add/remove edges: `--add "from:to"` `--remove "from:to"`
 - `merge-topics` — merge tightly coupled topics: `merge-topics <discovery> "a,b" "Name"`
-- `update-metadata` — set name, description, intent, key_files from a JSON file
+- `update-metadata` — set name, description, key_files inline or from a JSON file
 
 **Enrich metadata.** Set description and other fields per topic:
 

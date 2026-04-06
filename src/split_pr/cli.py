@@ -588,17 +588,15 @@ def update_metadata(
 
     Two modes:
     1. From a file: update-metadata discovery.json metadata.json
-    2. Inline:      update-metadata discovery.json --set "config:intent=scaffolding"
-                    --set "config:description=Foundation config changes"
+    2. Inline:      update-metadata discovery.json --set "config:description=Foundation config"
 
-    Supported fields: name, description, intent, is_shared.
+    Supported fields: name, description, is_shared.
     Both modes can be combined. --set values override file values.
 
     Example --set usage:
-        --set "config:intent=scaffolding"
         --set "config:description=Foundation config and dependency changes"
-        --set "auth:intent=behavioral"
         --set "auth:name=Auth module refactoring"
+        --set "auth:description=Cached authorization table, email lookup, query-token auth"
     """
     discovery = json.loads(discovery_file.read_text())
     topics = discovery.get("dag", {}).get("topics", {})
@@ -637,7 +635,7 @@ def update_metadata(
             skipped.append(topic_id)
             continue
         if field_name not in ("name", "description", "is_shared", "key_files"):
-            typer.echo(f"ERROR: unknown field '{field_name}' — expected name/description/intent/is_shared/key_files", err=True)
+            typer.echo(f"ERROR: unknown field '{field_name}' — expected name/description/is_shared/key_files", err=True)
             raise typer.Exit(1)
 
         # Parse boolean/json for specific fields
@@ -960,15 +958,9 @@ def merge_topics_cmd(
     # Serialize back
     dag_dict = dag.to_dict()
 
-    # Preserve key_files and intent in the serialized form
+    # Preserve key_files in the serialized form
     if key_files:
         dag_dict["topics"][merged_id]["key_files"] = key_files
-    # Pick intent from first topic that has one
-    for tid in topic_ids:
-        intent = topics[tid].get("intent", "")
-        if intent:
-            dag_dict["topics"][merged_id]["intent"] = intent
-            break
 
     discovery["dag"] = dag_dict
 
