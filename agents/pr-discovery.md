@@ -133,13 +133,26 @@ lockfiles (`uv.lock`, `yarn.lock`), codegen output (`*_pb2.py`, `*.pb.go`,
 `zz_generated*`), and files with `// Code generated` or `# AUTO-GENERATED`
 headers.
 
-### Step 4: Trace function usage in multi-concern files
+### Step 4: Split multi-concern files by function
 
-The `analyze` step splits large files into per-function virtual hunks. A file
-like `adapter.py` with 30 hunks is already split — assign each function to
-the right topic.
+**IMPORTANT — Single files with multiple concerns MUST be split.** The
+`analyze` step splits large files into per-function virtual hunks. A file
+like `adapter.py` with 30 hunks is already split — you just need to assign
+each function's hunk to the right topic. The tooling handles partial file
+patches correctly.
 
-**Algorithm:**
+**"Can't split because it's one file" or "tightly-coupled" is NEVER a valid
+reason to keep a multi-hunk file as one topic.** If the file has multiple
+hunks with different section headers, split them. The only exception is if
+every function in the file truly serves the same single purpose.
+
+This is especially important for:
+- **Adapter/bridge files** with one function per feature
+- **Route files** registering multiple endpoints
+- **Config files** with settings for different subsystems
+- **`__init__.py` exports** grouping unrelated public APIs
+
+**How to determine which topic a function belongs to — import tracing:**
 
 1. Identify leaf files (routes, CLI commands, feature modules) — these are
    consumers. Group them into candidate topics.
@@ -147,13 +160,15 @@ the right topic.
    from shared/adapter/bridge files.
 3. Assign each consumed function's hunk to the consumer's topic.
 4. Functions consumed by multiple topics → shared infrastructure topic.
-5. Functions consumed by no file in this diff → group by feature domain
-   (e.g., `get_forecast_*` = forecast topic, `clone_brand_*` = manage-cubes).
-   Do not lump unreferenced functions into one group.
+5. Functions consumed by no file in this diff → group by feature domain.
+   For example, 14 functions named `get_forecast_*`, `save_cube_data_*`
+   form a "forecast adapter" topic. A separate set named `clone_brand_*`,
+   `trim_cube_*` form a different topic. Do NOT lump unreferenced functions
+   into one catch-all group.
 6. Preamble hunks (file-level imports) → earliest topic in dependency order.
 
-Run this BEFORE finalizing topics. Multi-function file classification depends
-on knowing who consumes each function.
+Run this BEFORE finalizing topics. If you classify adapter.py as one topic
+first and check consumers later, you'll miss the split.
 
 "Same file" and "shared imports" are not evidence of tight coupling. Tight
 coupling means function A calls function B's internals, or they modify the
@@ -223,13 +238,22 @@ Use `assign-hunks` to write `discovery.json`. Do NOT write it manually.
 ```bash
 split-pr-tools assign-hunks $RUN/hunks.json $RUN/discovery.json \
   --bulk-topic "legacy-shims" --bulk-path "_legacy/_shims/" \
-  --topic "forecast-adapter:scope:get_versions_adapter,fill_in_otb_adapter" \
-  --topic "manage-cubes:scope:clone_brand_adapter,trim_cube_adapter" \
-  --topic "config:path:config.py,pyproject.toml,uv.lock" \
+  --topic "forecast-adapter:scope:get_versions_adapter,fill_in_otb_adapter,..." \
+  --topic "manage-cubes:scope:clone_brand_adapter,trim_cube_adapter,..." \
+  --topic "config:path:config.py,pyproject.toml,.gitignore,uv.lock" \
   --topic "database:path:database/" \
+  --topic "caching:path:caching/" \
+  --topic "auth:path:auth/" \
+  --topic "forecast-routes:path:inseason/forecast/" \
+  --topic "manage-cubes-routes:path:inseason/manage_cubes/" \
   --remainder "other" \
-  --dep "config:database" --dep "database:caching"
+  --dep "config:database" \
+  --dep "database:caching"
 ```
+
+Note how the adapter file is split by **scope** (function name) into separate
+topics, while route/endpoint files are split by **path**. This is the key
+pattern for multi-concern files.
 
 **Assignment formats:**
 - `"name:scope:func1,func2"` — by function name
