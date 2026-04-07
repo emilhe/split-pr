@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "split-pr",
-      "source": ".",
+      "source": "./",
       "description": "Split large PRs into chains of smaller, reviewable PRs using DAG-based semantic analysis",
       "version": "0.1.0"
     }
