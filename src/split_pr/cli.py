@@ -1842,7 +1842,7 @@ def render_dag_full(
         size = tdata.get("estimated_size", 0)
         info = topic_info.get(tid)
         if info:
-            label = f"#{info['index']}/{info['total']} {name}<br/>{size} lines"
+            label = f"{info['index']}/{info['total']} {name}<br/>{size} lines"
         else:
             label = f"{name}<br/>{size} lines"
 
