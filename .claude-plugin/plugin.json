@@ -9,6 +9,6 @@
   "license": "MIT",
   "keywords": ["git", "pr", "code-review", "refactoring", "split"],
   "commands": "./commands/",
-  "agents": "./agents/",
+  "agents": ["./agents/pr-discovery.md", "./agents/pr-splitter.md"],
   "hooks": "./hooks/hooks.json"
 }
