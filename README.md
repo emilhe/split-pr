@@ -21,10 +21,10 @@ A Claude Code plugin that splits large PRs into chains of small, reviewable PRs.
 ```
 /split-pr                              # split current branch vs main
 /split-pr --base develop               # different base branch
-/split-pr --name fcst-mig              # custom prefix for PR titles
+/split-pr --name auth-refactor         # custom prefix for PR titles
 /split-pr --threshold 600              # larger PRs allowed (default: 400 lines)
 /split-pr --max-files 15               # max files per PR (default: 10)
-/split-pr --bulk "_legacy/_shims/"     # skip AST analysis for vendored paths
+/split-pr --bulk "vendor/"             # skip AST analysis for vendored paths
 /split-pr --auto                       # skip interactive review
 /split-pr --pr 42                      # split an existing PR
 ```

@@ -678,13 +678,13 @@ def assign_hunks(
     resolves them to the correct hunk IDs internally.
 
     Examples:
-        --topic "forecast-adapter:scope:get_versions_adapter,fill_in_otb_adapter"
-        --topic "manage-cubes:scope:clone_brand_adapter,trim_cube_adapter"
-        --topic "config:path:config.py,pyproject.toml,.gitignore"
+        --topic "orders:scope:get_order,create_order,process_refund"
+        --topic "notifications:scope:send_notification,schedule_reminder"
+        --topic "config:path:config.py,pyproject.toml"
         --topic "database:path:database/"
-        --bulk-topic "legacy-shims" --bulk-path "_legacy/_shims/"
-        --remainder "misc"
-        --dep "config:database" --dep "database:caching"
+        --bulk-topic "vendor-lib" --bulk-path "vendor/"
+        --remainder "other"
+        --dep "config:database" --dep "database:auth"
     """
     hunks_data = json.loads(hunks_file.read_text())
 

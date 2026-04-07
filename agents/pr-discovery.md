@@ -45,8 +45,8 @@ These override all other classification guidance.
 
 2. **Bulk imports stay atomic.** Vendored copies, shims, and generated code
    directories are one topic — including their tests. Do not sub-split
-   `_legacy/_shims/` by subdirectory. `tests/legacy/` (integrity tests,
-   conftest for legacy imports) belongs to the same bulk topic.
+   vendored directories by subdirectory. Tests verifying vendored code
+   (integrity tests, conftest for imports) belong to the same bulk topic.
 
 3. **No catch-all topics.** Every hunk has a semantic home. "misc",
    "cleanup", "other changes" are forbidden. If something seems
@@ -121,7 +121,7 @@ Read selectively — skim for structure and imports, then use `find-symbol`
 for targeted tracing rather than reading every line:
 
 ```bash
-split-pr-tools find-symbol $RUN/hunks.json get_forecast_adapter --exact
+split-pr-tools find-symbol $RUN/hunks.json process_order --exact
 ```
 
 You do NOT need to work with hunk IDs. The `assign-hunks` command resolves
@@ -166,10 +166,10 @@ This is especially important for:
 3. Assign each consumed function's hunk to the consumer's topic.
 4. Functions consumed by multiple topics → shared infrastructure topic.
 5. Functions consumed by no file in this diff → group by feature domain.
-   For example, 14 functions named `get_forecast_*`, `save_cube_data_*`
-   form a "forecast adapter" topic. A separate set named `clone_brand_*`,
-   `trim_cube_*` form a different topic. Do NOT lump unreferenced functions
-   into one catch-all group.
+   For example, functions named `get_order_*`, `create_invoice_*` form
+   an "orders adapter" topic. A separate set named `send_notification_*`,
+   `schedule_reminder_*` form a different topic. Do NOT lump unreferenced
+   functions into one catch-all group.
 6. Preamble hunks (file-level imports) → earliest topic in dependency order.
 
 Run this BEFORE finalizing topics. If you classify adapter.py as one topic
@@ -242,18 +242,17 @@ Use `assign-hunks` to write `discovery.json`. Do NOT write it manually.
 
 ```bash
 split-pr-tools assign-hunks $RUN/hunks.json $RUN/discovery.json \
-  --bulk-topic "legacy-shims" --bulk-path "_legacy/_shims/" \
-  --topic "forecast-adapter:scope:get_versions_adapter,fill_in_otb_adapter,..." \
-  --topic "manage-cubes:scope:clone_brand_adapter,trim_cube_adapter,..." \
-  --topic "config:path:config.py,pyproject.toml,.gitignore,uv.lock" \
+  --bulk-topic "vendor-lib" --bulk-path "vendor/legacy-lib/" \
+  --topic "orders:scope:get_order,create_order,process_refund,..." \
+  --topic "notifications:scope:send_notification,schedule_reminder,..." \
+  --topic "config:path:config.py,pyproject.toml,uv.lock" \
   --topic "database:path:database/" \
-  --topic "caching:path:caching/" \
   --topic "auth:path:auth/" \
-  --topic "forecast-routes:path:inseason/forecast/" \
-  --topic "manage-cubes-routes:path:inseason/manage_cubes/" \
+  --topic "order-routes:path:api/orders/" \
+  --topic "notification-routes:path:api/notifications/" \
   --remainder "other" \
   --dep "config:database" \
-  --dep "database:caching"
+  --dep "database:auth"
 ```
 
 Note how the adapter file is split by **scope** (function name) into separate
@@ -288,7 +287,7 @@ If INVALID: adjust topic patterns and re-run assign-hunks.
 ```bash
 split-pr-tools update-metadata $RUN/discovery.json \
   --set "config:description=Foundation config and dependency changes" \
-  --set "auth:description=Auth module refactoring with cached authorization"
+  --set "auth:description=Refactored auth with cached permission lookups"
 ```
 
 Or write a metadata JSON file and pass it as a positional argument.
