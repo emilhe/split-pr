@@ -1,0 +1,17 @@
+{
+  "name": "emilhe-split-pr",
+  "owner": {
+    "name": "Emil Eriksen"
+  },
+  "metadata": {
+    "description": "Split large PRs into chains of smaller, reviewable PRs"
+  },
+  "plugins": [
+    {
+      "name": "split-pr",
+      "source": ".",
+      "description": "Split large PRs into chains of smaller, reviewable PRs using DAG-based semantic analysis",
+      "version": "0.1.0"
+    }
+  ]
+}
