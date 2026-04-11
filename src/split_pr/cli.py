@@ -54,6 +54,14 @@ def _audit_log(ctx: typer.Context) -> None:
             pass  # Don't fail if we can't write the log
 
 
+def _mermaid_id(tid: str) -> str:
+    """Sanitize a topic ID for use as a Mermaid node ID.
+
+    Mermaid interprets hyphens as operators. Replace with underscores.
+    """
+    return tid.replace("-", "_")
+
+
 def _get_assignments(discovery: dict, hunks_data: dict | None = None) -> dict[str, str]:
     """Get hunk-to-topic assignments, deriving from hunk_ids if needed.
 
@@ -1422,19 +1430,20 @@ def create_prs(
         # Build highlighted DAG with links
         dag_lines = ["```mermaid", "graph LR"]
         for tid, tdata in discovery["dag"]["topics"].items():
+            mid = _mermaid_id(tid)
             tname = tdata.get("name", tid)
             size = tdata.get("estimated_size", 0)
             label = f"{tname}<br/>{size} lines"
             if tid == topic_id:
-                dag_lines.append(f'    {tid}["{label}"]:::current')
+                dag_lines.append(f'    {mid}["{label}"]:::current')
             else:
-                dag_lines.append(f'    {tid}["{label}"]')
+                dag_lines.append(f'    {mid}["{label}"]')
         for e in discovery["dag"].get("edges", []):
-            dag_lines.append(f"    {e['from']} --> {e['to']}")
+            dag_lines.append(f"    {_mermaid_id(e['from'])} --> {_mermaid_id(e['to'])}")
         dag_lines.append("")
         for tid, url in links.items():
             if tid in discovery["dag"]["topics"]:
-                dag_lines.append(f'    click {tid} href "{url}" _blank')
+                dag_lines.append(f'    click {_mermaid_id(tid)} href "{url}" _blank')
         dag_lines.append("")
         dag_lines.append("    classDef current fill:#4CAF50,stroke:#333,color:#fff,stroke-width:3px")
         dag_lines.append("```")
@@ -1776,24 +1785,25 @@ def render_dag(
 
     # Node definitions with labels
     for tid, tdata in topics.items():
+        mid = _mermaid_id(tid)
         name = tdata.get("name", tid)
         size = tdata.get("estimated_size", 0)
         label = f"{name}<br/>{size} lines"
         if highlight and tid == highlight:
-            lines.append(f'    {tid}["{label}"]:::current')
+            lines.append(f'    {mid}["{label}"]:::current')
         else:
-            lines.append(f'    {tid}["{label}"]')
+            lines.append(f'    {mid}["{label}"]')
 
     # Edges
     for e in edges:
-        lines.append(f"    {e['from']} --> {e['to']}")
+        lines.append(f"    {_mermaid_id(e['from'])} --> {_mermaid_id(e['to'])}")
 
     # Click links to PRs
     if links:
         lines.append("")
         for tid, url in links.items():
             if tid in topics:
-                lines.append(f'    click {tid} href "{url}" _blank')
+                lines.append(f'    click {_mermaid_id(tid)} href "{url}" _blank')
 
     # Styles
     lines.append("")
@@ -1838,6 +1848,7 @@ def render_dag_full(
 
     # Node definitions
     for tid, tdata in topics.items():
+        mid = _mermaid_id(tid)
         name = tdata.get("name", tid)
         size = tdata.get("estimated_size", 0)
         info = topic_info.get(tid)
@@ -1846,11 +1857,11 @@ def render_dag_full(
         else:
             label = f"{name}<br/>{size} lines"
 
-        lines.append(f'    {tid}["{label}"]')
+        lines.append(f'    {mid}["{label}"]')
 
     # Edges
     for e in edges:
-        lines.append(f"    {e['from']} --> {e['to']}")
+        lines.append(f"    {_mermaid_id(e['from'])} --> {_mermaid_id(e['to'])}")
 
     # Find independent groups (nodes with no edges between them)
     # by checking weakly connected components
@@ -1862,7 +1873,7 @@ def render_dag_full(
             if len(group) > 1:
                 lines.append(f"    subgraph group{i}[Parallel group {i+1}]")
                 for tid in sorted(group):
-                    lines.append(f"        {tid}")
+                    lines.append(f"        {_mermaid_id(tid)}")
                 lines.append("    end")
 
     # Click links to PRs
@@ -1870,7 +1881,7 @@ def render_dag_full(
         lines.append("")
         for tid, url in links.items():
             if tid in topics:
-                lines.append(f'    click {tid} href "{url}" _blank')
+                lines.append(f'    click {_mermaid_id(tid)} href "{url}" _blank')
 
     lines.append("```")
 
