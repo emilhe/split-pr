@@ -50,11 +50,19 @@ class SplitPlan:
 
     This is the output of the planning phase and the input to the
     execution phase.
+
+    ``absorbed_into`` records discovery topics that ended up with no
+    raw hunks after virtual-to-raw resolution, and the topic whose
+    branch actually carries their content. Used by base-branch
+    resolution (so `cube-routes -> legacy-adapter-summary` falls back
+    to the branch that absorbed summary) and by the DAG renderer (so
+    orphan nodes still link to the landing PR).
     """
 
     original_base: str
     branches: list[BranchPlan] = field(default_factory=list)
     unassigned_hunk_ids: list[str] = field(default_factory=list)
+    absorbed_into: dict[str, str] = field(default_factory=dict)
     iteration: int = 0
     max_iterations: int = 5
 
@@ -99,6 +107,7 @@ class SplitPlanner:
         base_branch: str = "main",
         size_threshold: int = 400,
         branch_prefix: str = "split",
+        absorbed_into: dict[str, str] | None = None,
     ) -> None:
         self.parsed_diff = parsed_diff
         self.dag = dag
@@ -109,6 +118,7 @@ class SplitPlanner:
             h.id: h for h in parsed_diff.all_hunks
         }
         self._assignments: dict[str, str] = {}  # hunk_id -> topic_id
+        self._absorbed_into: dict[str, str] = dict(absorbed_into or {})
 
     def assign_hunk(self, hunk_id: str, topic_id: str) -> None:
         """Assign a hunk to a topic."""
@@ -147,6 +157,25 @@ class SplitPlanner:
             if self.get_topic_size(tid) > self.size_threshold
         ]
 
+    def resolve_absorption(self, topic_id: str) -> str:
+        """Follow absorption edges to the topic that actually has a branch.
+
+        If ``topic_id`` was absorbed into another topic during virtual-to-raw
+        hunk resolution (because two topics claimed virtual hunks from the
+        same underlying raw hunk), walk the absorption chain. Returns
+        ``topic_id`` unchanged if it wasn't absorbed.
+        """
+        seen = {topic_id}
+        current = topic_id
+        while current in self._absorbed_into:
+            current = self._absorbed_into[current]
+            if current in seen:
+                # Guard against self-referential absorption; shouldn't
+                # happen but silent infinite loops would be worse.
+                break
+            seen.add(current)
+        return current
+
     def _resolve_base_branch(self, topic_id: str) -> str:
         """Determine what branch a topic's PR should target.
 
@@ -156,17 +185,39 @@ class SplitPlanner:
         - If it has multiple dependencies, target the last one in
           topological order (all others will have been merged by then
           in a linear merge strategy).
+
+        Absorbed dependencies (no branch of their own) are followed to
+        the topic that actually carries their hunks.
         """
         deps = self.dag.get_dependencies(topic_id)
         if not deps:
             return self.base_branch
 
-        if len(deps) == 1:
-            return self._branch_name(deps[0])
+        # Resolve any absorbed deps to the topic that actually has a branch.
+        resolved_deps = [self.resolve_absorption(d) for d in deps]
+        # Drop the current topic if it ends up depending on itself post-absorption,
+        # and deduplicate while preserving order.
+        seen: set[str] = set()
+        unique_deps: list[str] = []
+        for d in resolved_deps:
+            if d == topic_id or d in seen:
+                continue
+            seen.add(d)
+            unique_deps.append(d)
+
+        if not unique_deps:
+            return self.base_branch
+
+        if len(unique_deps) == 1:
+            return self._branch_name(unique_deps[0])
 
         # Multiple deps: target the one that comes latest in topo order
         order = self.dag.linearize()
-        dep_positions = {d: order.index(d) for d in deps}
+        # Absorbed topics are no longer in the linearization order of live
+        # topics, but resolve_absorption guarantees `unique_deps` are all
+        # live. If a dep is somehow missing from order (shouldn't happen),
+        # fall back to treating it as position 0.
+        dep_positions = {d: order.index(d) if d in order else 0 for d in unique_deps}
         latest = max(dep_positions, key=dep_positions.get)  # type: ignore[arg-type]
         return self._branch_name(latest)
 
@@ -214,6 +265,10 @@ class SplitPlanner:
         # Track unassigned hunks
         plan.unassigned_hunk_ids = [h.id for h in self.get_unassigned_hunks()]
 
+        # Carry absorption map through to downstream tools (render-dag-full,
+        # create-prs) so orphan topics can link to the PR that absorbed them.
+        plan.absorbed_into = dict(self._absorbed_into)
+
         return plan
 
     def get_hunk(self, hunk_id: str) -> Hunk:
@@ -232,6 +287,7 @@ class SplitPlanner:
                 "total_size": plan.total_size,
                 "has_unassigned": plan.has_unassigned,
                 "unassigned_count": len(plan.unassigned_hunk_ids),
+                "absorbed_into": dict(plan.absorbed_into),
                 "branches": [
                     {
                         "topic_id": b.topic_id,

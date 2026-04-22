@@ -281,6 +281,26 @@ class TestPlanSerialization:
                 assert "file_path" in hunk
                 assert "content" in hunk
 
+    def test_plan_json_includes_absorbed_into(self):
+        parsed, dag, assignments = _build_test_setup()
+        # cats is empty → pretend it was absorbed into dogs so downstream
+        # consumers can route cats references to the dogs branch.
+        dag_copy = TopicDAG()
+        for t in dag.topics.values():
+            dag_copy.add_topic(t)
+        for dep in ("cats", "dogs"):
+            dag_copy.add_dependency("shared", dep)
+        planner = SplitPlanner(parsed, dag_copy, absorbed_into={"cats": "dogs"})
+        # Only give cats' hunks to dogs so the "cats" topic itself is empty.
+        cats_to_dogs = {
+            hid: ("dogs" if tid == "cats" else tid) for hid, tid in assignments.items()
+        }
+        planner.assign_hunks(cats_to_dogs)
+        plan = planner.build_plan()
+
+        data = json.loads(planner.plan_to_json(plan))
+        assert data["absorbed_into"] == {"cats": "dogs"}
+
 
 class TestValidationStatus:
     def test_default_pending(self):
@@ -414,3 +434,103 @@ index 0000003..0000004 100644
         plan = planner.build_plan()
         for branch in plan.branches:
             assert branch.base_branch == "main"
+
+
+class TestAbsorption:
+    """Dependency resolution and base-branch selection with absorbed topics."""
+
+    def _abc_setup(self):
+        """Three-topic linear chain: a -> b -> c.
+
+        a has no hunks (simulating absorption); b and c have one each.
+        """
+        diff_text = """\
+diff --git a/b.py b/b.py
+index 0000001..0000002 100644
+--- a/b.py
++++ b/b.py
+@@ -1,1 +1,2 @@
+ x = 1
++y = 2
+diff --git a/c.py b/c.py
+index 0000003..0000004 100644
+--- a/c.py
++++ b/c.py
+@@ -1,1 +1,2 @@
+ x = 1
++y = 2
+"""
+        parsed = parse_diff(diff_text)
+        dag = TopicDAG()
+        dag.add_topic(Topic(id="a", name="A"))
+        dag.add_topic(Topic(id="b", name="B"))
+        dag.add_topic(Topic(id="c", name="C"))
+        dag.add_dependency("a", "b")
+        dag.add_dependency("b", "c")
+        return parsed, dag
+
+    def test_absorbed_dep_follows_chain(self):
+        """c depends on b; if b was absorbed into a, c targets a's branch."""
+        parsed, dag = self._abc_setup()
+        planner = SplitPlanner(parsed, dag, absorbed_into={"b": "a"})
+        # All hunks go to a (b is absorbed into a).
+        for h in parsed.all_hunks:
+            tid = "a" if h.file_path == "b.py" else "c"
+            planner.assign_hunk(h.id, tid)
+        plan = planner.build_plan()
+
+        c_branch = plan.get_branch("c")
+        assert c_branch is not None
+        # c's stated dep is b, but b was absorbed into a — so c targets a's branch.
+        assert "a" in c_branch.base_branch
+        assert "b" not in c_branch.base_branch
+
+    def test_absorbed_dep_chain_multi_hop(self):
+        """a -> b -> c -> d, where b is absorbed into a and c is absorbed into a."""
+        diff_text = """\
+diff --git a/a.py b/a.py
+index 0000001..0000002 100644
+--- a/a.py
++++ b/a.py
+@@ -1,1 +1,2 @@
+ x = 1
++y = 2
+diff --git a/d.py b/d.py
+index 0000003..0000004 100644
+--- a/d.py
++++ b/d.py
+@@ -1,1 +1,2 @@
+ x = 1
++y = 2
+"""
+        parsed = parse_diff(diff_text)
+        dag = TopicDAG()
+        for tid in ("a", "b", "c", "d"):
+            dag.add_topic(Topic(id=tid, name=tid.upper()))
+        dag.add_dependency("a", "b")
+        dag.add_dependency("b", "c")
+        dag.add_dependency("c", "d")
+
+        planner = SplitPlanner(parsed, dag, absorbed_into={"b": "a", "c": "a"})
+        for h in parsed.all_hunks:
+            planner.assign_hunk(h.id, "a" if h.file_path == "a.py" else "d")
+        plan = planner.build_plan()
+
+        d_branch = plan.get_branch("d")
+        assert d_branch is not None
+        # d -> c, c absorbed into a → d targets a's branch after the walk.
+        assert "a" in d_branch.base_branch
+
+    def test_resolve_absorption_stops_at_live_topic(self):
+        parsed, dag = self._abc_setup()
+        planner = SplitPlanner(parsed, dag, absorbed_into={"b": "a"})
+        assert planner.resolve_absorption("b") == "a"
+        assert planner.resolve_absorption("a") == "a"  # not absorbed
+        assert planner.resolve_absorption("c") == "c"  # not absorbed
+
+    def test_resolve_absorption_handles_self_cycle(self):
+        """Self-referential absorption (shouldn't happen) doesn't loop."""
+        parsed, dag = self._abc_setup()
+        planner = SplitPlanner(parsed, dag, absorbed_into={"a": "a"})
+        # Should return without infinite-looping; landing topic is "a".
+        assert planner.resolve_absorption("a") == "a"

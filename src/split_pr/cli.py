@@ -62,16 +62,29 @@ def _mermaid_id(tid: str) -> str:
     return tid.replace("-", "_")
 
 
-def _get_assignments(discovery: dict, hunks_data: dict | None = None) -> dict[str, str]:
+def _get_assignments(
+    discovery: dict, hunks_data: dict | None = None
+) -> tuple[dict[str, str], dict[str, str]]:
     """Get hunk-to-topic assignments, deriving from hunk_ids if needed.
 
     The discovery agent may write assignments as either:
     - Top-level "assignments" dict: {"hunk_id": "topic_id", ...}
     - Per-topic "hunk_ids" lists in dag.topics
 
-    If hunks_data is provided, resolves virtual hunk IDs (from tree-sitter
+    If ``hunks_data`` is provided, resolves virtual hunk IDs (from tree-sitter
     analysis) back to their original raw diff hunk IDs via the
-    original_hunk_id field.
+    ``original_hunk_id`` field.
+
+    When multiple topics claim virtual hunks that resolve to the same raw
+    hunk (common for large new files split per-function), the topic with
+    the largest total virtual-hunk size wins that raw hunk. Losing topics
+    that end up with zero raw hunks are recorded in the returned
+    ``absorbed_into`` map so downstream tools can follow the absorption.
+
+    Returns:
+        ``(assignments, absorbed_into)`` where ``assignments`` maps
+        raw hunk IDs to topic IDs and ``absorbed_into`` maps absorbed
+        topic IDs to the topic that claimed most of their content.
     """
     if "assignments" in discovery and discovery["assignments"]:
         raw = discovery["assignments"]
@@ -84,28 +97,62 @@ def _get_assignments(discovery: dict, hunks_data: dict | None = None) -> dict[st
                     raw[hunk_id] = topic_id
 
     if not hunks_data:
-        return raw
+        return raw, {}
 
-    # Build virtual-to-raw ID mapping from the analyzed hunks
-    virtual_to_raw: dict[str, str] = {}
+    # Build virtual-id -> (raw-id, size) mapping from the analyzed hunks.
+    virtual_info: dict[str, tuple[str, int]] = {}
     for file_info in hunks_data.get("files", []):
         for h in file_info.get("hunks", []):
             original = h.get("original_hunk_id")
             if original:
-                virtual_to_raw[h["id"]] = original
+                size = h.get("size") or (
+                    h.get("added_lines", 0) + h.get("removed_lines", 0)
+                )
+                virtual_info[h["id"]] = (original, size)
 
-    if not virtual_to_raw:
-        return raw
+    if not virtual_info:
+        return raw, {}
 
-    # Resolve virtual IDs to raw IDs (multiple virtual hunks may map
-    # to the same raw hunk — deduplicate by keeping the first assignment)
-    resolved: dict[str, str] = {}
+    # For each raw hunk, aggregate size claimed by each topic (via its
+    # virtual hunks). Non-virtual hunks pass through with size 0 — they
+    # map directly to themselves and never compete with virtual hunks.
+    by_raw: dict[str, dict[str, int]] = {}
     for hunk_id, topic_id in raw.items():
-        raw_id = virtual_to_raw.get(hunk_id, hunk_id)
-        if raw_id not in resolved:
-            resolved[raw_id] = topic_id
+        raw_id, size = virtual_info.get(hunk_id, (hunk_id, 0))
+        bucket = by_raw.setdefault(raw_id, {})
+        bucket[topic_id] = bucket.get(topic_id, 0) + size
 
-    return resolved
+    # Resolve each raw hunk to a single topic (the one claiming the most size).
+    resolved: dict[str, str] = {}
+    for raw_id, topic_sizes in by_raw.items():
+        if len(topic_sizes) == 1:
+            resolved[raw_id] = next(iter(topic_sizes))
+            continue
+        # Ties: max() is stable and picks the first entry with the max
+        # value, which preserves insertion order and gives deterministic
+        # results across runs for a given discovery file.
+        winner = max(topic_sizes.items(), key=lambda kv: kv[1])[0]
+        resolved[raw_id] = winner
+
+    # A topic is "absorbed" when it appears in the input assignments but
+    # has no raw hunks after resolution. For each absorbed topic, pick
+    # the winner that claimed the most of its virtual-hunk size as the
+    # single absorbing topic.
+    topics_with_raw = set(resolved.values())
+    absorbed_into: dict[str, str] = {}
+    for loser in set(raw.values()) - topics_with_raw:
+        winner_sizes: dict[str, int] = {}
+        for raw_id, topic_sizes in by_raw.items():
+            if loser not in topic_sizes:
+                continue
+            winner = resolved[raw_id]
+            winner_sizes[winner] = winner_sizes.get(winner, 0) + topic_sizes[loser]
+        if winner_sizes:
+            absorbed_into[loser] = max(
+                winner_sizes.items(), key=lambda kv: kv[1]
+            )[0]
+
+    return resolved, absorbed_into
 
 
 @app.command(name="parse-diff")
@@ -488,7 +535,7 @@ def show_discovery(
                 "size": h.get("added_lines", 0) + h.get("removed_lines", 0),
             }
 
-    assignments = _get_assignments(discovery)
+    assignments, _ = _get_assignments(discovery)
     all_hunk_ids = set(hunk_info.keys())
     assigned_ids = set(assignments.keys())
 
@@ -1053,8 +1100,15 @@ def build_plan(
     hunks_data = json.loads(hunks_file.read_text()) if hunks_file else None
     dag = TopicDAG.from_dict(discovery["dag"])
 
-    planner = SplitPlanner(parsed, dag, base_branch=base, size_threshold=threshold)
-    planner.assign_hunks(_get_assignments(discovery, hunks_data))
+    assignments, absorbed_into = _get_assignments(discovery, hunks_data)
+    planner = SplitPlanner(
+        parsed,
+        dag,
+        base_branch=base,
+        size_threshold=threshold,
+        absorbed_into=absorbed_into,
+    )
+    planner.assign_hunks(assignments)
     plan = planner.build_plan()
     typer.echo(planner.plan_to_json(plan))
 
@@ -1412,8 +1466,22 @@ def create_prs(
         pr_map[topic_id] = {"number": pr_number, "url": pr_url}
         typer.echo(f"  Created: {pr_url}")
 
-    # Build links file
+    # Build links file. Include absorbed topics pointing at the PR that
+    # carries their content so the rendered DAG is fully clickable even
+    # when callers pass only `--links` (no plan.json).
     links = {tid: info["url"] for tid, info in pr_map.items()}
+    absorbed_into = dict(plan.get("absorbed_into") or {})
+    for absorbed, winner in absorbed_into.items():
+        # Walk the absorption chain in case of A -> B -> C.
+        landing = winner
+        seen = {absorbed, landing}
+        while landing in absorbed_into:
+            landing = absorbed_into[landing]
+            if landing in seen:
+                break
+            seen.add(landing)
+        if landing in links:
+            links[absorbed] = links[landing]
     if links_out:
         links_out.write_text(json.dumps(links, indent=2))
         typer.echo(f"\nLinks written to {links_out}")
@@ -1530,8 +1598,11 @@ def check_sizes(
     hunks_data = json.loads(hunks_file.read_text()) if hunks_file else None
     dag = TopicDAG.from_dict(discovery["dag"])
 
-    planner = SplitPlanner(parsed, dag, size_threshold=threshold)
-    planner.assign_hunks(_get_assignments(discovery, hunks_data))
+    assignments, absorbed_into = _get_assignments(discovery, hunks_data)
+    planner = SplitPlanner(
+        parsed, dag, size_threshold=threshold, absorbed_into=absorbed_into
+    )
+    planner.assign_hunks(assignments)
     oversized = planner.get_oversized_topics()
 
     if not oversized:
@@ -1589,7 +1660,7 @@ def validate_discovery(
     else:
         # For validation, use assignments as-is (no virtual→raw resolution)
         # We want to check that discovery IDs match hunks.json IDs directly
-        assignments = _get_assignments(discovery)
+        assignments, _ = _get_assignments(discovery)
 
     assigned_ids = set(assignments.keys())
 
@@ -1824,6 +1895,10 @@ def render_dag_full(
 
     Includes topic sizes, PR numbers (if plan provided), parallel
     group annotations, and clickable links to PRs (if --links provided).
+
+    Topics that were absorbed into another topic during plan building
+    (no branch of their own) are drawn dashed and link through to the
+    absorbing topic's PR so the DAG stays navigable.
     """
     discovery = json.loads(discovery_file.read_text())
     plan = json.loads(plan_file.read_text()) if plan_file else None
@@ -1835,6 +1910,7 @@ def render_dag_full(
 
     # Build topic-to-branch mapping from plan
     topic_info: dict[str, dict] = {}
+    absorbed_into: dict[str, str] = {}
     if plan:
         for i, b in enumerate(plan["branches"], 1):
             topic_info[b["topic_id"]] = {
@@ -1843,8 +1919,20 @@ def render_dag_full(
                 "size": b["estimated_size"],
                 "base": b["base_branch"],
             }
+        absorbed_into = dict(plan.get("absorbed_into") or {})
+
+    def landing_topic(tid: str) -> str:
+        """Walk the absorption chain to a topic with a real branch."""
+        seen = {tid}
+        while tid in absorbed_into:
+            tid = absorbed_into[tid]
+            if tid in seen:
+                break
+            seen.add(tid)
+        return tid
 
     lines = ["```mermaid", "graph LR"]
+    absorbed_nodes: list[str] = []
 
     # Node definitions
     for tid, tdata in topics.items():
@@ -1854,10 +1942,20 @@ def render_dag_full(
         info = topic_info.get(tid)
         if info:
             label = f"{info['index']}/{info['total']} {name}<br/>{size} lines"
+            lines.append(f'    {mid}["{label}"]')
+        elif tid in absorbed_into:
+            landing = landing_topic(tid)
+            landing_info = topic_info.get(landing)
+            if landing_info:
+                suffix = f"(in {landing_info['index']}/{landing_info['total']})"
+            else:
+                suffix = "(absorbed)"
+            label = f"{name}<br/>{size} lines<br/>{suffix}"
+            lines.append(f'    {mid}["{label}"]:::absorbed')
+            absorbed_nodes.append(tid)
         else:
             label = f"{name}<br/>{size} lines"
-
-        lines.append(f'    {mid}["{label}"]')
+            lines.append(f'    {mid}["{label}"]')
 
     # Edges
     for e in edges:
@@ -1876,12 +1974,28 @@ def render_dag_full(
                     lines.append(f"        {_mermaid_id(tid)}")
                 lines.append("    end")
 
-    # Click links to PRs
+    # Click links to PRs. Absorbed topics link through to the absorbing
+    # topic's PR so "no PR of its own" nodes are still navigable.
     if links:
         lines.append("")
-        for tid, url in links.items():
-            if tid in topics:
-                lines.append(f'    click {_mermaid_id(tid)} href "{url}" _blank')
+        for tid in topics:
+            if tid in links:
+                lines.append(f'    click {_mermaid_id(tid)} href "{links[tid]}" _blank')
+                continue
+            if tid in absorbed_into:
+                landing = landing_topic(tid)
+                if landing in links:
+                    lines.append(
+                        f'    click {_mermaid_id(tid)} href "{links[landing]}" _blank'
+                    )
+
+    # Styles
+    if absorbed_nodes:
+        lines.append("")
+        lines.append(
+            "    classDef absorbed fill:#f5f5f5,stroke:#999,"
+            "stroke-dasharray:5 5,color:#666"
+        )
 
     lines.append("```")
 
