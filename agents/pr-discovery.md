@@ -280,6 +280,15 @@ If INVALID: adjust topic patterns and re-run assign-hunks.
 **Post-assignment adjustments** (avoids re-running assign-hunks):
 - `edit-edges` — add/remove edges: `--add "from:to"` `--remove "from:to"`
 - `merge-topics` — merge tightly coupled topics: `merge-topics <discovery> "a,b" "Name"`
+- `split-topic` — split one topic into sub-topics by path or scope; external edges transfer to every sub-topic, ``--dep`` adds intra-split edges. Prefer this over re-running assign-hunks when only one topic needs decomposition:
+  ```bash
+  split-pr-tools split-topic $RUN/hunks.json $RUN/discovery.json cube-foundation \
+      --into "legacy-adapter-core:path:_legacy/adapter/,tests/inseason/" \
+      --into "cube-skeleton:path:appretio/api.py,appretio/cube/" \
+      --into "old-forecast-removal:path:inseason/forecast/v1/" \
+      --dep "cube-skeleton:legacy-adapter-core"
+  ```
+  Fails fast if any hunk doesn't match exactly one rule (no silent drops). Follow with `update-metadata` to attach descriptions and `key_files` to the new sub-topics.
 - `update-metadata` — set name, description, key_files inline or from a JSON file
 
 **Enrich metadata.** Set description and other fields per topic:

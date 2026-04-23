@@ -201,6 +201,175 @@ class TestRenderDagFullAbsorbed:
         assert 'click winner href "https://example.com/pr/1"' in out
         assert 'click absorbed href "https://example.com/pr/1"' in out
 
+class TestSplitTopicCommand:
+    """split-topic distributes hunks into sub-topics and transfers DAG edges."""
+
+    def _discovery(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Build a minimal hunks.json + discovery.json with one big topic."""
+        hunks = {
+            "files": [
+                {
+                    "path": "src/adapter/shared.py",
+                    "hunks": [
+                        {
+                            "id": "h1",
+                            "file_path": "src/adapter/shared.py",
+                            "added_lines": 200,
+                            "removed_lines": 0,
+                        },
+                    ],
+                },
+                {
+                    "path": "src/cube/model.py",
+                    "hunks": [
+                        {
+                            "id": "h2",
+                            "file_path": "src/cube/model.py",
+                            "added_lines": 400,
+                            "removed_lines": 0,
+                        },
+                    ],
+                },
+                {
+                    "path": "src/inseason/forecast/route.py",
+                    "hunks": [
+                        {
+                            "id": "h3",
+                            "file_path": "src/inseason/forecast/route.py",
+                            "added_lines": 0,
+                            "removed_lines": 300,
+                        },
+                    ],
+                },
+            ]
+        }
+        discovery = {
+            "dag": {
+                "topics": {
+                    "shared": {
+                        "id": "shared", "name": "Shared", "estimated_size": 50,
+                        "hunk_ids": [], "is_shared": True,
+                    },
+                    "cube-foundation": {
+                        "id": "cube-foundation", "name": "Cube foundation",
+                        "estimated_size": 900,
+                        "hunk_ids": ["h1", "h2", "h3"], "is_shared": False,
+                    },
+                    "downstream": {
+                        "id": "downstream", "name": "Downstream",
+                        "estimated_size": 100, "hunk_ids": [], "is_shared": False,
+                    },
+                },
+                "edges": [
+                    {"from": "shared", "to": "cube-foundation"},
+                    {"from": "cube-foundation", "to": "downstream"},
+                ],
+            },
+            "assignments": {
+                "h1": "cube-foundation",
+                "h2": "cube-foundation",
+                "h3": "cube-foundation",
+            },
+        }
+        hunks_path = tmp_path / "hunks.json"
+        discovery_path = tmp_path / "discovery.json"
+        hunks_path.write_text(json.dumps(hunks))
+        discovery_path.write_text(json.dumps(discovery))
+        return hunks_path, discovery_path
+
+    def test_happy_path_splits_and_rewires(self, tmp_path: Path):
+        hunks_path, discovery_path = self._discovery(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "split-topic", str(hunks_path), str(discovery_path), "cube-foundation",
+                "--into", "legacy-adapter-core:path:src/adapter/",
+                "--into", "cube-skeleton:path:src/cube/",
+                "--into", "old-forecast-removal:path:src/inseason/forecast/",
+                "--dep", "cube-skeleton:legacy-adapter-core",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(discovery_path.read_text())
+        topics = data["dag"]["topics"]
+        assert "cube-foundation" not in topics
+        assert set(topics.keys()) == {
+            "shared", "legacy-adapter-core", "cube-skeleton",
+            "old-forecast-removal", "downstream",
+        }
+
+        # Hunks distributed.
+        assignments = data["assignments"]
+        assert assignments["h1"] == "legacy-adapter-core"
+        assert assignments["h2"] == "cube-skeleton"
+        assert assignments["h3"] == "old-forecast-removal"
+
+        # External edges transferred to every sub-topic.
+        edges = {(e["from"], e["to"]) for e in data["dag"]["edges"]}
+        for new_id in ("legacy-adapter-core", "cube-skeleton", "old-forecast-removal"):
+            assert ("shared", new_id) in edges
+            assert (new_id, "downstream") in edges
+        # Intra-split dep applied.
+        assert ("cube-skeleton", "legacy-adapter-core") in edges
+        # Old topic's edges gone.
+        assert not any("cube-foundation" in e for e in edges)
+
+        # Estimated sizes reflect assigned hunks (from hunks.json).
+        assert topics["legacy-adapter-core"]["estimated_size"] == 200
+        assert topics["cube-skeleton"]["estimated_size"] == 400
+        assert topics["old-forecast-removal"]["estimated_size"] == 300
+
+    def test_unmatched_hunks_fail_fast(self, tmp_path: Path):
+        hunks_path, discovery_path = self._discovery(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "split-topic", str(hunks_path), str(discovery_path), "cube-foundation",
+                "--into", "legacy-adapter-core:path:src/adapter/",
+                "--into", "cube-skeleton:path:src/cube/",
+                # h3 (src/inseason/forecast/route.py) isn't covered.
+            ],
+        )
+        assert result.exit_code != 0
+        assert "don't match any" in result.output
+        # discovery.json unchanged.
+        data = json.loads(discovery_path.read_text())
+        assert "cube-foundation" in data["dag"]["topics"]
+
+    def test_overlapping_rules_fail_fast(self, tmp_path: Path):
+        hunks_path, discovery_path = self._discovery(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "split-topic", str(hunks_path), str(discovery_path), "cube-foundation",
+                # Both rules match h1.
+                "--into", "a:path:src/",
+                "--into", "b:path:adapter/",
+                "--into", "c:path:never-matches",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "multiple rules" in result.output
+
+    def test_dry_run_does_not_write(self, tmp_path: Path):
+        hunks_path, discovery_path = self._discovery(tmp_path)
+        before = discovery_path.read_text()
+        result = runner.invoke(
+            app,
+            [
+                "split-topic", str(hunks_path), str(discovery_path), "cube-foundation",
+                "--into", "legacy-adapter-core:path:src/adapter/",
+                "--into", "cube-skeleton:path:src/cube/",
+                "--into", "old-forecast-removal:path:src/inseason/forecast/",
+                "--dry-run",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert discovery_path.read_text() == before
+        assert "Would split" in result.output
+
+
+class TestRenderDagFullNoAbsorption:
     def test_no_absorption_no_dashed_style(self, tmp_path: Path):
         discovery = {
             "dag": {
@@ -220,8 +389,10 @@ class TestRenderDagFullAbsorbed:
             ],
             "absorbed_into": {},
         }
-        discovery_path = self._write(tmp_path, "discovery.json", discovery)
-        plan_path = self._write(tmp_path, "plan.json", plan)
+        discovery_path = tmp_path / "discovery.json"
+        plan_path = tmp_path / "plan.json"
+        discovery_path.write_text(json.dumps(discovery))
+        plan_path.write_text(json.dumps(plan))
         result = runner.invoke(
             app, ["render-dag-full", str(discovery_path), str(plan_path)]
         )

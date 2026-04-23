@@ -59,6 +59,7 @@ Split a large PR or branch diff into a chain of smaller, reviewable PRs.
 | `assign-hunks <hunks> <output> --topic X --bulk-topic X --dep X` | Assign hunks to topics by scope/path (no IDs needed) |
 | `edit-edges <discovery> --add "from:to" --remove "from:to"` | Add/remove edges without re-running assign-hunks |
 | `merge-topics <discovery> "a,b" "New Name"` | Merge topics, preserving external edges and metadata |
+| `split-topic <hunks> <discovery> <topic> --into "new_id:path:p1,p2" --dep "a:b"` | Split one topic into sub-topics by path or scope; transfers external edges |
 | `show-hunks <hunks> [ids] --file X --preview N` | Inspect hunks by ID or file path, with content preview |
 | `show-plan <plan> -v --branch X` | Plan summary with dependencies, files per branch. **Branches are in merge order.** |
 | `build-plan <diff> <discovery> <base> <threshold> --hunks <hunks>` | Generate split plan from discovery |
@@ -192,13 +193,16 @@ Present to the user:
 
 Ask the user if they want to:
 - Approve and proceed
-- Merge specific topics
-- Rename topics
-- Adjust dependencies
+- Merge specific topics (`merge-topics`)
+- Split a topic into sub-topics (`split-topic`, e.g. when an oversized
+  topic bundles multiple logical units)
+- Rename topics or adjust descriptions (`update-metadata`)
+- Adjust dependencies (`edit-edges`)
 - Abort
 
-If they request changes, re-run `assign-hunks` with adjusted topics or
-`update-metadata` for renames/descriptions. Re-present until approved.
+If they request changes, use the targeted commands above — do NOT
+re-run `assign-hunks` (that rebuilds discovery.json from scratch and
+loses edits). Re-present until approved.
 
 If `--auto`, skip this phase entirely.
 

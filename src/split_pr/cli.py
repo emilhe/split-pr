@@ -21,7 +21,7 @@ from pathlib import Path
 import typer
 
 from split_pr.diff_parser import ParsedDiff, build_patch, parse_diff
-from split_pr.dag import TopicDAG
+from split_pr.dag import Topic, TopicDAG
 from split_pr.state import SplitPlanner
 
 app = typer.Typer(help="Split-PR tools — called by the split-pr skill and agents.")
@@ -1065,6 +1065,217 @@ def merge_topics_cmd(
         typer.echo(f"  depends on: {', '.join(deps)}")
     if dependents:
         typer.echo(f"  depended on by: {', '.join(dependents)}")
+
+
+def _match_hunks_by_rule(
+    hunks_for_topic: list[dict], match_type: str, patterns: list[str]
+) -> list[str]:
+    """Return hunk IDs from ``hunks_for_topic`` that match the rule.
+
+    Matching semantics mirror ``assign-hunks``: path rules are substring
+    matches on ``_file_path``; scope rules check the ``scope`` list (from
+    tree-sitter analysis) and ``section_header``.
+    """
+    matched: list[str] = []
+    for h in hunks_for_topic:
+        if match_type == "path":
+            if any(p in h.get("_file_path", "") for p in patterns):
+                matched.append(h["id"])
+        elif match_type == "scope":
+            scope = h.get("scope", []) or []
+            section = h.get("section_header", "") or ""
+            if any(p in scope or p == section for p in patterns):
+                matched.append(h["id"])
+    return matched
+
+
+@app.command(name="split-topic")
+def split_topic_cmd(
+    hunks_file: Path = typer.Argument(..., help="Path to analyzed hunks JSON"),
+    discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
+    topic_id: str = typer.Argument(..., help="Topic to split"),
+    into: list[str] = typer.Option(
+        [], "--into", "-i",
+        help="Sub-topic rule: 'new_id:path:patterns' or 'new_id:scope:names' (repeatable)",
+    ),
+    deps: list[str] = typer.Option(
+        [], "--dep", "-d",
+        help="Intra-split dependency edge: 'from:to' (repeatable)",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Print what would change without writing discovery.json",
+    ),
+) -> None:
+    """Split one topic into multiple sub-topics by file path or scope.
+
+    The source topic is removed; its hunks are redistributed to the new
+    sub-topics according to each --into rule, and its external DAG edges
+    are transferred to every new sub-topic (conservative default — prune
+    with ``edit-edges`` afterward if needed). Fails fast if any hunk
+    doesn't match exactly one rule, so no hunks are silently dropped or
+    double-assigned.
+
+    Mirrors ``merge-topics`` (same discovery.json in-place edits) and
+    ``assign-hunks`` (path/scope pattern syntax). Attach descriptions
+    and key_files to the new sub-topics afterwards with
+    ``update-metadata``.
+
+    Example — split a 3k-line topic into 3 sub-topics:
+        split-pr-tools split-topic hunks.json discovery.json cube-foundation \\
+            --into "legacy-adapter-core:path:_legacy/adapter/,tests/inseason/" \\
+            --into "cube-skeleton:path:appretio/api.py,appretio/cube/" \\
+            --into "old-forecast-removal:path:inseason/forecast/v1/" \\
+            --dep "cube-skeleton:legacy-adapter-core" \\
+            --dep "cube-skeleton:old-forecast-removal"
+    """
+    if len(into) < 2:
+        typer.echo("ERROR: need at least 2 --into rules to split", err=True)
+        raise typer.Exit(1)
+
+    hunks_data = json.loads(hunks_file.read_text())
+    discovery = json.loads(discovery_file.read_text())
+
+    topics = discovery.get("dag", {}).get("topics", {})
+    if topic_id not in topics:
+        typer.echo(f"ERROR: topic '{topic_id}' not found in discovery", err=True)
+        raise typer.Exit(1)
+
+    assignments, _ = _get_assignments(discovery)
+
+    # Build a hunk_id -> hunk-dict index restricted to the source topic.
+    hunks_for_topic: list[dict] = []
+    hunk_size: dict[str, int] = {}
+    for file_info in hunks_data["files"]:
+        for h in file_info["hunks"]:
+            if assignments.get(h["id"]) != topic_id:
+                continue
+            h_with_path = {**h, "_file_path": file_info.get("path", h.get("file_path", ""))}
+            hunks_for_topic.append(h_with_path)
+            hunk_size[h["id"]] = (
+                h_with_path.get("added_lines", 0) + h_with_path.get("removed_lines", 0)
+            )
+
+    if not hunks_for_topic:
+        typer.echo(f"ERROR: topic '{topic_id}' has no hunks", err=True)
+        raise typer.Exit(1)
+
+    # Parse --into specs and match hunks.
+    assigned_by_rule: dict[str, list[str]] = {}
+    new_ids: list[str] = []
+    for spec in into:
+        parts = spec.split(":", 2)
+        if len(parts) != 3:
+            typer.echo(
+                f"ERROR: invalid --into '{spec}' — expected 'new_id:path:p1,p2' or 'new_id:scope:n1,n2'",
+                err=True,
+            )
+            raise typer.Exit(1)
+        new_id, match_type, values = parts
+        if match_type not in ("path", "scope"):
+            typer.echo(f"ERROR: unknown match type '{match_type}' — use 'path' or 'scope'", err=True)
+            raise typer.Exit(1)
+        if new_id in topics and new_id != topic_id:
+            typer.echo(f"ERROR: topic '{new_id}' already exists", err=True)
+            raise typer.Exit(1)
+        patterns = [v.strip() for v in values.split(",") if v.strip()]
+        assigned_by_rule[new_id] = _match_hunks_by_rule(hunks_for_topic, match_type, patterns)
+        new_ids.append(new_id)
+
+    # Validate coverage: every hunk matched exactly once, no rule empty.
+    claims: dict[str, list[str]] = {}
+    for new_id, ids in assigned_by_rule.items():
+        for hid in ids:
+            claims.setdefault(hid, []).append(new_id)
+    unmatched = [h for h in hunks_for_topic if h["id"] not in claims]
+    overlapping = {hid: ns for hid, ns in claims.items() if len(ns) > 1}
+    if unmatched:
+        typer.echo(f"ERROR: {len(unmatched)} hunks don't match any --into rule:", err=True)
+        for h in unmatched[:10]:
+            typer.echo(f"  {h['_file_path']} (scope={h.get('scope') or []})", err=True)
+        if len(unmatched) > 10:
+            typer.echo(f"  ... and {len(unmatched) - 10} more", err=True)
+        raise typer.Exit(1)
+    if overlapping:
+        typer.echo(f"ERROR: {len(overlapping)} hunks match multiple rules:", err=True)
+        for hid, ns in list(overlapping.items())[:10]:
+            typer.echo(f"  {hid}: {', '.join(ns)}", err=True)
+        raise typer.Exit(1)
+    empty_rules = [n for n, ids in assigned_by_rule.items() if not ids]
+    if empty_rules:
+        typer.echo(f"ERROR: rules matched zero hunks: {', '.join(empty_rules)}", err=True)
+        raise typer.Exit(1)
+
+    # Parse intra-split deps.
+    intra_edges: list[tuple[str, str]] = []
+    for d in deps:
+        ds = d.split(":", 1)
+        if len(ds) != 2:
+            typer.echo(f"ERROR: invalid --dep '{d}' — expected 'from:to'", err=True)
+            raise typer.Exit(1)
+        frm, to = ds[0].strip(), ds[1].strip()
+        if frm not in new_ids or to not in new_ids:
+            typer.echo(f"ERROR: --dep endpoints must be new sub-topic IDs: {d}", err=True)
+            raise typer.Exit(1)
+        intra_edges.append((frm, to))
+
+    # Build new Topic objects.
+    source_topic_data = topics[topic_id]
+    source_is_shared = bool(source_topic_data.get("is_shared", False))
+    new_topics: list[Topic] = []
+    for new_id in new_ids:
+        ids = assigned_by_rule[new_id]
+        size = sum(hunk_size.get(h, 0) for h in ids)
+        new_topics.append(
+            Topic(
+                id=new_id,
+                name=new_id,
+                description=f"Split from '{topic_id}'",
+                estimated_size=size,
+                hunk_ids=list(ids),
+                is_shared=source_is_shared,
+            )
+        )
+
+    # Dry-run: report and exit.
+    if dry_run:
+        typer.echo(f"Would split '{topic_id}' into {len(new_topics)} sub-topics:")
+        for t in new_topics:
+            files = {
+                h["_file_path"] for h in hunks_for_topic if h["id"] in set(t.hunk_ids)
+            }
+            typer.echo(
+                f"  {t.id}: {len(t.hunk_ids)} hunks, {t.estimated_size} lines, {len(files)} files"
+            )
+        for frm, to in intra_edges:
+            typer.echo(f"  dep: {frm} -> {to}")
+        return
+
+    # Apply the split on the DAG.
+    dag = TopicDAG.from_dict(discovery["dag"])
+    dag.split_topic(topic_id, new_topics, internal_deps=intra_edges)
+
+    # Serialize updated DAG back.
+    discovery["dag"] = dag.to_dict()
+
+    # Update assignments: hunks formerly mapped to the source topic now
+    # map to their new sub-topic.
+    hid_to_new: dict[str, str] = {}
+    for new_id, ids in assigned_by_rule.items():
+        for hid in ids:
+            hid_to_new[hid] = new_id
+    if "assignments" in discovery:
+        for hid, old_tid in list(discovery["assignments"].items()):
+            if old_tid == topic_id:
+                discovery["assignments"][hid] = hid_to_new[hid]
+
+    discovery_file.write_text(json.dumps(discovery, indent=2))
+
+    typer.echo(f"Split '{topic_id}' into {len(new_topics)} sub-topics in {discovery_file}:")
+    for t in new_topics:
+        typer.echo(f"  {t.id}: {len(t.hunk_ids)} hunks, {t.estimated_size} lines")
+    if intra_edges:
+        typer.echo(f"  intra-split edges: {', '.join(f'{a}->{b}' for a, b in intra_edges)}")
 
 
 @app.command(name="show-plan")
