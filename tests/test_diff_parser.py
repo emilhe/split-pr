@@ -348,3 +348,117 @@ class TestBuildPatch:
         reparsed = parse_diff(patch)
         assert reparsed.file_count == parsed.file_count
         assert reparsed.hunk_count == parsed.hunk_count
+
+
+# -- Pure renames and binary files: operations with no unidiff hunks --
+
+PURE_RENAME_DIFF = """\
+diff --git a/src/old/__init__.py b/src/new/__init__.py
+similarity index 100%
+rename from src/old/__init__.py
+rename to src/new/__init__.py
+"""
+
+BINARY_DELETE_DIFF = """\
+diff --git a/data/sample.parquet b/data/sample.parquet
+deleted file mode 100644
+index cb55ddd..0000000
+Binary files a/data/sample.parquet and /dev/null differ
+"""
+
+
+class TestPureRename:
+    """Pure renames (100% similarity, no content change) must survive the pipeline."""
+
+    def test_parse_creates_synthetic_hunk(self):
+        parsed = parse_diff(PURE_RENAME_DIFF)
+        assert parsed.file_count == 1
+        f = parsed.files[0]
+        assert f.is_rename
+        assert not f.is_new
+        assert not f.is_deleted
+        assert f.old_path == "src/old/__init__.py"
+        assert f.path == "src/new/__init__.py"
+        # A synthetic hunk must exist so the file is assignable to a topic.
+        assert len(f.hunks) == 1
+        assert f.hunks[0].content == ""
+
+    def test_build_patch_emits_similarity_index(self):
+        parsed = parse_diff(PURE_RENAME_DIFF)
+        all_ids = {h.id for h in parsed.all_hunks}
+        patch = build_patch(parsed, all_ids)
+        assert "similarity index 100%" in patch
+        assert "rename from src/old/__init__.py" in patch
+        assert "rename to src/new/__init__.py" in patch
+        # No content body for a pure rename.
+        assert "---" not in patch.replace("--- ", "")  # no --- a/… lines
+        assert "+++" not in patch
+        assert "@@" not in patch
+
+    def test_roundtrip_is_detected_as_rename(self):
+        parsed = parse_diff(PURE_RENAME_DIFF)
+        all_ids = {h.id for h in parsed.all_hunks}
+        patch = build_patch(parsed, all_ids)
+        reparsed = parse_diff(patch)
+        assert reparsed.files[0].is_rename
+
+
+class TestBinaryFiles:
+    """Binary files are flagged and excluded from text patches."""
+
+    def test_parse_flags_binary_delete(self):
+        parsed = parse_diff(BINARY_DELETE_DIFF)
+        assert parsed.file_count == 1
+        f = parsed.files[0]
+        assert f.is_binary
+        assert f.is_deleted
+        # Synthetic hunk so the file is assignable to a topic.
+        assert len(f.hunks) == 1
+
+    def test_binary_excluded_from_patch(self):
+        """Binary files must not appear in build_patch output — git apply can't handle them."""
+        parsed = parse_diff(BINARY_DELETE_DIFF)
+        all_ids = {h.id for h in parsed.all_hunks}
+        patch = build_patch(parsed, all_ids)
+        assert patch == ""
+
+    def test_is_binary_serialized_in_json(self):
+        parsed = parse_diff(BINARY_DELETE_DIFF)
+        data = json.loads(parsed.to_json())
+        assert data["files"][0]["is_binary"] is True
+
+    def test_binary_mixed_with_text_only_emits_text(self):
+        """A diff with both binary and text files emits only the text part in the patch."""
+        combined = BINARY_DELETE_DIFF + SIMPLE_DIFF
+        parsed = parse_diff(combined)
+        all_ids = {h.id for h in parsed.all_hunks}
+        patch = build_patch(parsed, all_ids)
+        assert "sample.parquet" not in patch
+        assert "src/models.py" in patch
+
+
+class TestCollectBinaryOps:
+    """_collect_binary_ops returns the git commands needed for binary files."""
+
+    def test_binary_delete_becomes_rm(self):
+        from split_pr.cli import _collect_binary_ops
+
+        parsed = parse_diff(BINARY_DELETE_DIFF)
+        all_ids = {h.id for h in parsed.all_hunks}
+        ops = _collect_binary_ops(parsed, all_ids)
+        assert ops == [("rm", "data/sample.parquet")]
+
+    def test_binary_not_selected_omitted(self):
+        from split_pr.cli import _collect_binary_ops
+
+        parsed = parse_diff(BINARY_DELETE_DIFF)
+        ops = _collect_binary_ops(parsed, set())  # no hunks selected
+        assert ops == []
+
+    def test_text_only_returns_empty(self):
+        from split_pr.cli import _collect_binary_ops
+
+        parsed = parse_diff(SIMPLE_DIFF)
+        all_ids = {h.id for h in parsed.all_hunks}
+        ops = _collect_binary_ops(parsed, all_ids)
+        assert ops == []

@@ -58,6 +58,7 @@ class FileDiff:
     is_rename: bool
     old_path: str | None
     hunks: list[Hunk] = field(default_factory=list)
+    is_binary: bool = False
 
     @property
     def total_size(self) -> int:
@@ -112,6 +113,7 @@ class ParsedDiff:
                         "is_new": f.is_new,
                         "is_deleted": f.is_deleted,
                         "is_rename": f.is_rename,
+                        "is_binary": f.is_binary,
                         "old_path": f.old_path,
                         "total_size": f.total_size,
                         "hunks": [asdict(h) for h in f.hunks],
@@ -144,26 +146,44 @@ def build_patch(parsed_diff: ParsedDiff, hunk_ids: set[str]) -> str:
         if not selected:
             continue
 
+        # Binary files are not representable as text patches without the
+        # actual blob content. Skip them entirely — the post-apply step
+        # in create-branches inspects the plan's file metadata and uses
+        # git commands (rm/add) to execute binary operations directly.
+        if file_diff.is_binary:
+            continue
+
         path = file_diff.path
         old_path = file_diff.old_path or path
 
         # File header
         parts.append(f"diff --git a/{old_path} b/{path}")
+        all_empty = all(h.content == "" for h in selected)
         if file_diff.is_new:
             parts.append("new file mode 100644")
             # Empty new files: header only, no --- / +++ / hunk body
-            if all(h.content == "" for h in selected):
+            if all_empty:
                 continue
             parts.append("--- /dev/null")
             parts.append(f"+++ b/{path}")
         elif file_diff.is_deleted:
             parts.append("deleted file mode 100644")
-            if all(h.content == "" for h in selected):
+            if all_empty:
                 continue
             parts.append(f"--- a/{old_path}")
             parts.append("+++ /dev/null")
         else:
             if file_diff.is_rename:
+                # Pure renames have no diff body — git apply accepts them
+                # with `similarity index 100%` + rename from/to and nothing
+                # else. Renames with content changes emit the rename header
+                # plus a normal unified diff; git apply tolerates those
+                # without the similarity-index line.
+                if all_empty:
+                    parts.append("similarity index 100%")
+                    parts.append(f"rename from {old_path}")
+                    parts.append(f"rename to {path}")
+                    continue
                 parts.append(f"rename from {old_path}")
                 parts.append(f"rename to {path}")
             parts.append(f"--- a/{old_path}")
@@ -231,6 +251,7 @@ def parse_diff(diff_text: str) -> ParsedDiff:
             is_deleted=patched_file.is_removed_file,
             is_rename=is_rename,
             old_path=old_path,
+            is_binary=bool(getattr(patched_file, "is_binary_file", False)),
         )
 
         for i, hunk in enumerate(patched_file):
@@ -252,12 +273,25 @@ def parse_diff(diff_text: str) -> ParsedDiff:
             )
             file_diff.hunks.append(hunk_obj)
 
-        # Synthetic hunk for empty new/deleted files (e.g., __init__.py).
-        # These have no real hunks but must flow through the pipeline so
-        # they get assigned to a topic and included in patches.
-        if not file_diff.hunks and (file_diff.is_new or file_diff.is_deleted):
+        # Synthetic hunk for file-level operations unidiff doesn't produce
+        # hunks for: empty new/deleted files, pure renames (100% similarity),
+        # and binary files. These must flow through the pipeline so they
+        # get assigned to a topic and executed during patch application.
+        if not file_diff.hunks and (
+            file_diff.is_new
+            or file_diff.is_deleted
+            or file_diff.is_rename
+            or file_diff.is_binary
+        ):
+            marker = (
+                "__binary__"
+                if file_diff.is_binary
+                else "__rename__"
+                if file_diff.is_rename
+                else "__empty_file__"
+            )
             file_diff.hunks.append(Hunk(
-                id=_make_hunk_id(path, 0, "__empty_file__"),
+                id=_make_hunk_id(path, 0, marker),
                 file_path=path,
                 source_start=0,
                 source_length=0,

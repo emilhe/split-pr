@@ -20,7 +20,7 @@ from pathlib import Path
 
 import typer
 
-from split_pr.diff_parser import build_patch, parse_diff
+from split_pr.diff_parser import ParsedDiff, build_patch, parse_diff
 from split_pr.dag import TopicDAG
 from split_pr.state import SplitPlanner
 
@@ -60,6 +60,36 @@ def _mermaid_id(tid: str) -> str:
     Mermaid interprets hyphens as operators. Replace with underscores.
     """
     return tid.replace("-", "_")
+
+
+def _collect_binary_ops(
+    parsed: ParsedDiff, hunk_ids: set[str]
+) -> list[tuple[str, str]]:
+    """Return binary file operations a branch needs executed outside `git apply`.
+
+    Binary files are excluded from the text patch because `git apply` can't
+    handle binary add/delete/modify without the actual blob content. The
+    caller (create-branches) replays these via direct git commands after
+    the text patch lands.
+
+    Returns a list of ``(op, path)`` tuples where ``op`` is ``"rm"`` (for
+    deletes — the only fully supported case), ``"add"`` (new binary file
+    — unsupported without a source ref), or ``"modify"`` (likewise
+    unsupported).
+    """
+    ops: list[tuple[str, str]] = []
+    for file_diff in parsed.files:
+        if not file_diff.is_binary:
+            continue
+        if not any(h.id in hunk_ids for h in file_diff.hunks):
+            continue
+        if file_diff.is_deleted:
+            ops.append(("rm", file_diff.path))
+        elif file_diff.is_new:
+            ops.append(("add", file_diff.path))
+        else:
+            ops.append(("modify", file_diff.path))
+    return ops
 
 
 def _get_assignments(
@@ -1178,14 +1208,30 @@ def create_branches(
         hunk_ids = {h["id"] for h in branch["hunks"]}
         patch = build_patch(parsed, hunk_ids)
 
-        if not patch.strip():
+        # Binary files aren't representable as text patches — build_patch
+        # excludes them. Collect the git commands needed to execute their
+        # file-level operations (rm / add / modify) after the text patch
+        # lands. For unsupported operations we fail fast here rather than
+        # applying a partial branch.
+        binary_ops = _collect_binary_ops(parsed, hunk_ids)
+        unsupported = [(op, p) for op, p in binary_ops if op != "rm"]
+        if unsupported:
+            typer.echo(
+                f"  ERROR: binary file operations require the source blob "
+                f"and aren't supported: {unsupported}",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        if not patch.strip() and not binary_ops:
             typer.echo(f"  WARNING: Empty patch for {topic_id}, skipping")
             results.append({"topic_id": topic_id, "status": "empty"})
             continue
 
-        # Write patch to temp file
+        # Write patch to temp file (only if non-empty)
         patch_path = Path(f"/tmp/split-pr-patch-{topic_id}.patch")
-        patch_path.write_text(patch)
+        if patch.strip():
+            patch_path.write_text(patch)
 
         # Checkout base and create branch
         r = git("checkout", base_branch)
@@ -1198,28 +1244,42 @@ def create_branches(
             typer.echo(f"  ERROR: create branch failed: {r.stderr.strip()}", err=True)
             raise typer.Exit(1)
 
-        # Apply patch: try clean first, then --3way
-        r = git("apply", "--check", str(patch_path))
-        if r.returncode == 0:
-            git("apply", str(patch_path))
-            typer.echo(f"  Patch applied cleanly")
-        else:
-            r = git("apply", "--3way", str(patch_path))
+        # Apply patch: try clean first, then --3way. Skip entirely when the
+        # branch is binary-operations only (build_patch returned nothing).
+        if patch.strip():
+            r = git("apply", "--check", str(patch_path))
             if r.returncode == 0:
-                typer.echo(f"  Patch applied with --3way")
+                git("apply", str(patch_path))
+                typer.echo(f"  Patch applied cleanly")
             else:
-                # Try --reject as last resort
-                r = git("apply", "--3way", "--reject", str(patch_path))
-                rej = subprocess.run(
-                    ["find", str(repo_dir), "-name", "*.rej"],
-                    capture_output=True, text=True,
-                )
-                if rej.stdout.strip():
-                    typer.echo(f"  FAILED: Unresolvable conflicts", err=True)
-                    typer.echo(f"  Reject files: {rej.stdout.strip()}", err=True)
-                    raise typer.Exit(1)
+                r = git("apply", "--3way", str(patch_path))
+                if r.returncode == 0:
+                    typer.echo(f"  Patch applied with --3way")
                 else:
-                    typer.echo(f"  Patch applied with --reject (no reject files)")
+                    # Try --reject as last resort
+                    r = git("apply", "--3way", "--reject", str(patch_path))
+                    rej = subprocess.run(
+                        ["find", str(repo_dir), "-name", "*.rej"],
+                        capture_output=True, text=True,
+                    )
+                    if rej.stdout.strip():
+                        typer.echo(f"  FAILED: Unresolvable conflicts", err=True)
+                        typer.echo(f"  Reject files: {rej.stdout.strip()}", err=True)
+                        raise typer.Exit(1)
+                    else:
+                        typer.echo(f"  Patch applied with --reject (no reject files)")
+
+        # Execute binary operations that weren't representable in the patch.
+        for op, bin_path in binary_ops:
+            if op == "rm":
+                r = git("rm", "-f", bin_path)
+                if r.returncode != 0:
+                    typer.echo(
+                        f"  ERROR: git rm {bin_path} failed: {r.stderr.strip()}",
+                        err=True,
+                    )
+                    raise typer.Exit(1)
+                typer.echo(f"  Binary delete: {bin_path}")
 
         # Stage and commit
         git("add", "-A")
