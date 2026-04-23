@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from split_pr.dag import TopicDAG, Topic
-from split_pr.diff_parser import Hunk, ParsedDiff
+from split_pr.diff_parser import Hunk, ParsedDiff, weighted_size
 
 
 class ValidationStatus(Enum):
@@ -108,6 +108,7 @@ class SplitPlanner:
         size_threshold: int = 400,
         branch_prefix: str = "split",
         absorbed_into: dict[str, str] | None = None,
+        delete_weight: float = 0.0,
     ) -> None:
         self.parsed_diff = parsed_diff
         self.dag = dag
@@ -119,6 +120,10 @@ class SplitPlanner:
         }
         self._assignments: dict[str, str] = {}  # hunk_id -> topic_id
         self._absorbed_into: dict[str, str] = dict(absorbed_into or {})
+        self.delete_weight = delete_weight
+
+    def _size(self, hunk: Hunk) -> int:
+        return weighted_size(hunk.added_lines, hunk.removed_lines, self.delete_weight)
 
     def assign_hunk(self, hunk_id: str, topic_id: str) -> None:
         """Assign a hunk to a topic."""
@@ -147,8 +152,16 @@ class SplitPlanner:
         ]
 
     def get_topic_size(self, topic_id: str) -> int:
-        """Total size (lines changed) for a topic."""
-        return sum(h.size for h in self.get_topic_hunks(topic_id))
+        """Weighted review size for a topic.
+
+        Applies the planner's ``delete_weight`` (default 0, so additions
+        only). This is what drives oversized-topic detection.
+        """
+        return sum(self._size(h) for h in self.get_topic_hunks(topic_id))
+
+    def get_topic_removed_lines(self, topic_id: str) -> int:
+        """Raw removed-line count for a topic (informational only)."""
+        return sum(h.removed_lines for h in self.get_topic_hunks(topic_id))
 
     def get_oversized_topics(self) -> list[str]:
         """Topics that exceed the size threshold."""
@@ -237,11 +250,13 @@ class SplitPlanner:
         """
         plan = SplitPlan(original_base=self.base_branch)
 
-        # Update topic sizes and hunk_ids from assignments
+        # Update topic sizes and hunk_ids from assignments. Size is the
+        # weighted review cost (default: additions only) — the metric
+        # used for threshold decisions and displayed to the user.
         for tid, topic in self.dag.topics.items():
             hunks = self.get_topic_hunks(tid)
             topic.hunk_ids = [h.id for h in hunks]
-            topic.estimated_size = sum(h.size for h in hunks)
+            topic.estimated_size = sum(self._size(h) for h in hunks)
 
         # Build branches in linearized order
         for topic_id in self.dag.linearize():
@@ -256,7 +271,7 @@ class SplitPlanner:
                 branch_name=self._branch_name(topic_id),
                 base_branch=self._resolve_base_branch(topic_id),
                 hunk_ids=[h.id for h in hunks],
-                estimated_size=sum(h.size for h in hunks),
+                estimated_size=sum(self._size(h) for h in hunks),
                 pr_title=topic.name,
                 pr_body=topic.description,
             )
@@ -278,13 +293,22 @@ class SplitPlanner:
         return self._hunk_index[hunk_id]
 
     def plan_to_json(self, plan: SplitPlan) -> str:
-        """Serialize a plan to JSON for agent consumption."""
+        """Serialize a plan to JSON for agent consumption.
+
+        ``estimated_size`` is the weighted review size. ``removed_lines``
+        per branch is informational only — it shows reviewers how much
+        deletion the branch contains without influencing split decisions.
+        Each hunk also ships its raw ``added_lines`` / ``removed_lines``
+        so downstream tools (PR body rendering, etc.) can format
+        ``+N/-M`` without re-parsing the diff.
+        """
         return json.dumps(
             {
                 "original_base": plan.original_base,
                 "iteration": plan.iteration,
                 "branch_count": plan.branch_count,
                 "total_size": plan.total_size,
+                "delete_weight": self.delete_weight,
                 "has_unassigned": plan.has_unassigned,
                 "unassigned_count": len(plan.unassigned_hunk_ids),
                 "absorbed_into": dict(plan.absorbed_into),
@@ -295,6 +319,9 @@ class SplitPlanner:
                         "base_branch": b.base_branch,
                         "hunk_count": len(b.hunk_ids),
                         "estimated_size": b.estimated_size,
+                        "removed_lines": sum(
+                            self.get_hunk(hid).removed_lines for hid in b.hunk_ids
+                        ),
                         "pr_title": b.pr_title,
                         "validation_status": b.validation_status.value,
                         "validation_errors": b.validation_errors,
@@ -302,7 +329,9 @@ class SplitPlanner:
                             {
                                 "id": h.id,
                                 "file_path": h.file_path,
-                                "size": h.size,
+                                "size": self._size(h),
+                                "added_lines": h.added_lines,
+                                "removed_lines": h.removed_lines,
                                 "content": h.content,
                             }
                             for h in (self.get_hunk(hid) for hid in b.hunk_ids)

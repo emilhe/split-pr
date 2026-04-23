@@ -14,6 +14,18 @@ from pathlib import PurePosixPath
 from unidiff import PatchSet
 
 
+def weighted_size(added: int, removed: int, delete_weight: float = 0.0) -> int:
+    """Review-cost estimate for a change: ``added + removed * delete_weight``.
+
+    The default ``delete_weight=0`` counts only added lines, on the theory
+    that reviewing a deletion is mostly "scan for references elsewhere"
+    rather than line-by-line correctness. Callers that want deletes to
+    contribute can pass e.g. ``0.25`` to count a deletion as a quarter of
+    an addition. Returns an integer so size arithmetic stays simple.
+    """
+    return int(added + removed * delete_weight)
+
+
 @dataclass(frozen=True)
 class Hunk:
     """A single contiguous change within a file.
@@ -36,8 +48,12 @@ class Hunk:
 
     @property
     def size(self) -> int:
-        """Net lines changed (added + removed)."""
-        return self.added_lines + self.removed_lines
+        """Review cost in lines (added only by default).
+
+        See :func:`weighted_size`. To include deletes, compute explicitly
+        with ``weighted_size(h.added_lines, h.removed_lines, weight)``.
+        """
+        return weighted_size(self.added_lines, self.removed_lines, 0.0)
 
     @property
     def file_extension(self) -> str:

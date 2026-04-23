@@ -534,3 +534,86 @@ index 0000003..0000004 100644
         planner = SplitPlanner(parsed, dag, absorbed_into={"a": "a"})
         # Should return without infinite-looping; landing topic is "a".
         assert planner.resolve_absorption("a") == "a"
+
+
+class TestDeleteWeight:
+    """SplitPlanner honors delete_weight for size / threshold decisions."""
+
+    def _delete_heavy_setup(self):
+        """Two topics: 'pure-delete' (500 removed) and 'pure-add' (50 added)."""
+        diff_text = """\
+diff --git a/deleted.py b/deleted.py
+deleted file mode 100644
+index aaa1111..0000000
+--- a/deleted.py
++++ /dev/null
+@@ -1,500 +0,0 @@
+""" + "\n".join(f"-line {i}" for i in range(500)) + """
+diff --git a/added.py b/added.py
+new file mode 100644
+index 0000000..bbb2222
+--- /dev/null
++++ b/added.py
+@@ -0,0 +1,50 @@
+""" + "\n".join(f"+line {i}" for i in range(50)) + "\n"
+
+        parsed = parse_diff(diff_text)
+        dag = TopicDAG()
+        dag.add_topic(Topic(id="pure-delete", name="Pure delete"))
+        dag.add_topic(Topic(id="pure-add", name="Pure add"))
+        return parsed, dag
+
+    def test_default_weight_pure_delete_has_zero_size(self):
+        parsed, dag = self._delete_heavy_setup()
+        planner = SplitPlanner(parsed, dag, size_threshold=100)
+        for h in parsed.all_hunks:
+            tid = "pure-delete" if h.file_path == "deleted.py" else "pure-add"
+            planner.assign_hunk(h.id, tid)
+        assert planner.get_topic_size("pure-delete") == 0
+        assert planner.get_topic_size("pure-add") == 50
+        # Threshold=100: pure-delete (0) is NOT oversized even though
+        # it deletes 500 lines. pure-add (50) is also fine.
+        assert planner.get_oversized_topics() == []
+
+    def test_custom_weight_makes_pure_delete_count(self):
+        parsed, dag = self._delete_heavy_setup()
+        planner = SplitPlanner(
+            parsed, dag, size_threshold=100, delete_weight=0.25
+        )
+        for h in parsed.all_hunks:
+            tid = "pure-delete" if h.file_path == "deleted.py" else "pure-add"
+            planner.assign_hunk(h.id, tid)
+        # 500 * 0.25 = 125 > 100 → oversized under weighted metric.
+        assert planner.get_topic_size("pure-delete") == 125
+        assert "pure-delete" in planner.get_oversized_topics()
+
+    def test_removed_lines_reported_alongside_weighted_size(self):
+        parsed, dag = self._delete_heavy_setup()
+        planner = SplitPlanner(parsed, dag)
+        for h in parsed.all_hunks:
+            tid = "pure-delete" if h.file_path == "deleted.py" else "pure-add"
+            planner.assign_hunk(h.id, tid)
+        # Raw removed lines stay visible so reports can show "(-500)".
+        assert planner.get_topic_removed_lines("pure-delete") == 500
+        assert planner.get_topic_removed_lines("pure-add") == 0
+
+    def test_plan_json_includes_delete_weight_and_per_branch_removed(self):
+        parsed, dag = self._delete_heavy_setup()
+        planner = SplitPlanner(parsed, dag, delete_weight=0.25)
+        for h in parsed.all_hunks:
+            tid = "pure-delete" if h.file_path == "deleted.py" else "pure-add"
+            planner.assign_hunk(h.id, tid)
+        plan = planner.build_plan()
+        data = json.loads(planner.plan_to_json(plan))
+        assert data["delete_weight"] == 0.25
+        delete_branch = next(
+            b for b in data["branches"] if b["topic_id"] == "pure-delete"
+        )
+        assert delete_branch["removed_lines"] == 500
+        assert delete_branch["estimated_size"] == 125  # 500 * 0.25
+        # Hunks in the plan carry raw added/removed so downstream can
+        # render +N/-M without re-parsing the diff.
+        assert all(
+            "added_lines" in h and "removed_lines" in h
+            for b in data["branches"] for h in b["hunks"]
+        )

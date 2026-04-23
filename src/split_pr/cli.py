@@ -20,7 +20,7 @@ from pathlib import Path
 
 import typer
 
-from split_pr.diff_parser import ParsedDiff, build_patch, parse_diff
+from split_pr.diff_parser import ParsedDiff, build_patch, parse_diff, weighted_size
 from split_pr.dag import Topic, TopicDAG
 from split_pr.state import SplitPlanner
 
@@ -319,21 +319,47 @@ def stats(
     hunks_file: Path = typer.Argument(..., help="Path to hunks JSON from parse-diff"),
     sort: str = typer.Option("", "--sort", help="Sort files by: size (descending)"),
     top: int = typer.Option(0, "--top", "-n", help="Show only the top N files"),
+    delete_weight: float = typer.Option(
+        0.0, "--delete-weight",
+        help="Weight for removed lines (default 0 = additions only).",
+    ),
 ) -> None:
-    """Print summary statistics for a parsed diff."""
+    """Print summary statistics for a parsed diff.
+
+    "Lines" is the weighted review size (default: added only). The
+    total deletion count is shown separately for context.
+    """
     data = json.loads(hunks_file.read_text())
     typer.echo(f"Files: {data['file_count']}")
     typer.echo(f"Hunks: {data['hunk_count']}")
-    typer.echo(f"Total lines changed: {data['total_size']}")
-    files = data["files"]
+
+    def _file_size(f: dict) -> tuple[int, int]:
+        added = sum(h.get("added_lines", 0) for h in f["hunks"])
+        removed = sum(h.get("removed_lines", 0) for h in f["hunks"])
+        return weighted_size(added, removed, delete_weight), removed
+
+    file_sizes: list[tuple[dict, int, int]] = [
+        (f, *_file_size(f)) for f in data["files"]
+    ]
+    total_size = sum(size for _, size, _ in file_sizes)
+    total_removed = sum(removed for _, _, removed in file_sizes)
+    removed_note = f" (-{total_removed} deleted)" if total_removed else ""
+    typer.echo(f"Total lines: {total_size}{removed_note}")
+
     if sort == "size":
-        files = sorted(files, key=lambda f: f["total_size"], reverse=True)
+        file_sizes = sorted(file_sizes, key=lambda x: x[1], reverse=True)
     if top > 0:
-        files = files[:top]
-    for f in files:
-        typer.echo(f"  {f['path']}: {f['total_size']} lines, {len(f['hunks'])} hunks"
-                   + (" [new]" if f["is_new"] else "")
-                   + (" [deleted]" if f["is_deleted"] else ""))
+        file_sizes = file_sizes[:top]
+    for f, size, removed in file_sizes:
+        suffix = ""
+        if f["is_new"]:
+            suffix += " [new]"
+        if f["is_deleted"]:
+            suffix += " [deleted]"
+        note = f" (-{removed})" if removed else ""
+        typer.echo(
+            f"  {f['path']}: {size} lines{note}, {len(f['hunks'])} hunks{suffix}"
+        )
 
 
 @app.command(name="list-hunks")
@@ -545,12 +571,21 @@ def show_discovery(
     sort: str = typer.Option("", "--sort", help="Sort topics by: size (descending)"),
     only: str = typer.Option("", "--only", help="With --topic: only show files matching these patterns"),
     skip: str = typer.Option("", "--skip", help="With --topic: exclude files matching these patterns"),
+    delete_weight: float = typer.Option(
+        0.0, "--delete-weight",
+        help="Weight for removed lines when computing size (default 0 = additions only).",
+    ),
 ) -> None:
     """Show discovery state: topics, sizes, and unassigned hunks.
 
-    Computes real sizes from hunk data (not estimated_size). Use --topic
-    to drill into one topic's files and scopes. Use --sort size to rank
-    topics by size. Use --only/--skip with --topic to filter files.
+    Sizes are the review-cost metric (``added + removed * delete_weight``).
+    Pass the same ``--delete-weight`` as ``build-plan`` to see the
+    numbers that will drive thresholds. Deletion counts are shown
+    alongside as ``(-N deleted)`` for context.
+
+    Use ``--topic`` to drill into one topic's files and scopes. Use
+    ``--sort size`` to rank topics by size. Use ``--only``/``--skip``
+    with ``--topic`` to filter files.
     """
     hunks_data = json.loads(hunks_file.read_text())
     discovery = json.loads(discovery_file.read_text())
@@ -559,10 +594,13 @@ def show_discovery(
     hunk_info: dict[str, dict] = {}
     for file_info in hunks_data["files"]:
         for h in file_info["hunks"]:
+            added = h.get("added_lines", 0)
+            removed = h.get("removed_lines", 0)
             hunk_info[h["id"]] = {
                 "file": file_info.get("path", h.get("file_path", "?")),
                 "scope": h.get("scope", []),
-                "size": h.get("added_lines", 0) + h.get("removed_lines", 0),
+                "size": weighted_size(added, removed, delete_weight),
+                "removed": removed,
             }
 
     assignments, _ = _get_assignments(discovery)
@@ -583,6 +621,7 @@ def show_discovery(
             raise typer.Exit(1)
 
         total_size = sum(hunk_info[h]["size"] for h in topic_hunks if h in hunk_info)
+        total_removed = sum(hunk_info[h]["removed"] for h in topic_hunks if h in hunk_info)
         files: dict[str, list[dict]] = {}
         for hid in topic_hunks:
             info = hunk_info.get(hid)
@@ -591,7 +630,11 @@ def show_discovery(
 
         deps = dep_map.get(topic, [])
         dep_str = f"  depends_on: {', '.join(deps)}" if deps else ""
-        typer.echo(f"{topic}: {len(topic_hunks)} hunks, {total_size} lines, {len(files)} files{dep_str}")
+        removed_note = f" (-{total_removed} deleted)" if total_removed else ""
+        typer.echo(
+            f"{topic}: {len(topic_hunks)} hunks, {total_size} lines{removed_note}, "
+            f"{len(files)} files{dep_str}"
+        )
 
         # Show topic description if available
         topic_data = discovery.get("dag", {}).get("topics", {}).get(topic, {})
@@ -623,11 +666,12 @@ def show_discovery(
         topic_stats: dict[str, dict] = {}
         for hid, tid in assignments.items():
             if tid not in topic_stats:
-                topic_stats[tid] = {"hunks": 0, "size": 0, "files": set()}
+                topic_stats[tid] = {"hunks": 0, "size": 0, "removed": 0, "files": set()}
             info = hunk_info.get(hid)
             if info:
                 topic_stats[tid]["hunks"] += 1
                 topic_stats[tid]["size"] += info["size"]
+                topic_stats[tid]["removed"] += info["removed"]
                 topic_stats[tid]["files"].add(info["file"])
 
         # Determine order
@@ -647,8 +691,9 @@ def show_discovery(
                 continue
             deps = dep_map.get(tid, [])
             dep_str = f"  depends: {', '.join(deps)}" if deps else ""
+            removed_note = f" (-{s['removed']})" if s["removed"] else ""
             typer.echo(
-                f"  {tid:40} {s['hunks']:4} hunks  {s['size']:5} lines  "
+                f"  {tid:40} {s['hunks']:4} hunks  {s['size']:5} lines{removed_note:>8}  "
                 f"{len(s['files']):2} files{dep_str}"
             )
 
@@ -1295,10 +1340,15 @@ def show_plan(
     for b in plan["branches"]:
         name_to_topic[b["branch_name"]] = b["topic_id"]
 
+    total_removed = sum(b.get("removed_lines", 0) for b in plan["branches"])
+    delete_weight = plan.get("delete_weight", 0.0)
     if not branch_id:
         typer.echo(f"Base: {plan['original_base']}")
         typer.echo(f"Branches: {plan['branch_count']}")
-        typer.echo(f"Total size: {plan['total_size']} lines")
+        removed_note = f" (-{total_removed} deleted)" if total_removed else ""
+        typer.echo(f"Total size: {plan['total_size']} lines{removed_note}")
+        if delete_weight:
+            typer.echo(f"Delete weight: {delete_weight}")
         typer.echo(f"Unassigned hunks: {plan['unassigned_count']}")
         typer.echo()
 
@@ -1307,23 +1357,30 @@ def show_plan(
             continue
 
         base_topic = name_to_topic.get(b["base_branch"], b["base_branch"])
+        branch_removed = b.get("removed_lines", 0)
+        branch_removed_note = f" (-{branch_removed})" if branch_removed else ""
         typer.echo(
             f"{i}. {b['topic_id']}  "
-            f"{b['estimated_size']} lines, {b['hunk_count']} hunks  "
+            f"{b['estimated_size']} lines{branch_removed_note}, {b['hunk_count']} hunks  "
             f"depends_on={base_topic}"
         )
         typer.echo(f"   branch={b['branch_name']}")
         typer.echo(f"   title={b.get('pr_title', '')}")
 
         if verbose or branch_id:
-            # Show files touched by this branch
-            files: dict[str, int] = {}
+            # Show files touched by this branch with weighted size and
+            # a parenthetical removal count when non-zero, matching the
+            # summary-line format.
+            files: dict[str, dict] = {}
             for h in b["hunks"]:
                 fp = h.get("file_path", "?")
-                files[fp] = files.get(fp, 0) + h.get("size", 0)
+                slot = files.setdefault(fp, {"size": 0, "removed": 0})
+                slot["size"] += h.get("size", 0)
+                slot["removed"] += h.get("removed_lines", 0)
             typer.echo(f"   files ({len(files)}):")
-            for fp, size in sorted(files.items()):
-                typer.echo(f"     {fp} ({size} lines)")
+            for fp, slot in sorted(files.items()):
+                note = f" (-{slot['removed']})" if slot["removed"] else ""
+                typer.echo(f"     {fp} ({slot['size']} lines{note})")
             typer.echo()
 
 
@@ -1334,8 +1391,20 @@ def build_plan(
     base: str = typer.Argument("main", help="Base branch name"),
     threshold: int = typer.Argument(400, help="Max lines per split PR"),
     hunks_file: Path = typer.Option(None, "--hunks", help="Analyzed hunks JSON (for virtual ID resolution)"),
+    delete_weight: float = typer.Option(
+        0.0, "--delete-weight",
+        help="Weight for removed lines in review-size metric (default 0 = additions only).",
+    ),
 ) -> None:
-    """Build a split plan from a diff and discovery output."""
+    """Build a split plan from a diff and discovery output.
+
+    Review size = ``added_lines + removed_lines * delete_weight``. With
+    the default weight 0, pure-deletion work contributes nothing to a
+    topic's reported size or to threshold decisions — matching the
+    observation that deleting code is much cheaper to review than
+    adding it. The full removed-line count is still recorded on each
+    branch for informational display.
+    """
     parsed = parse_diff(diff_file.read_text())
     discovery = json.loads(discovery_file.read_text())
     hunks_data = json.loads(hunks_file.read_text()) if hunks_file else None
@@ -1348,6 +1417,7 @@ def build_plan(
         base_branch=base,
         size_threshold=threshold,
         absorbed_into=absorbed_into,
+        delete_weight=delete_weight,
     )
     planner.assign_hunks(assignments)
     plan = planner.build_plan()
@@ -1862,8 +1932,16 @@ def check_sizes(
     discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
     threshold: int = typer.Argument(400, help="Max lines per split PR"),
     hunks_file: Path = typer.Option(None, "--hunks", help="Analyzed hunks JSON (for virtual ID resolution)"),
+    delete_weight: float = typer.Option(
+        0.0, "--delete-weight",
+        help="Weight for removed lines in review-size metric (default 0 = additions only).",
+    ),
 ) -> None:
-    """Check topic sizes and report any that exceed the threshold."""
+    """Check topic sizes and report any that exceed the threshold.
+
+    Uses the same review-size metric as ``build-plan``. Pass the same
+    ``--delete-weight`` to both so the threshold picture matches.
+    """
     parsed = parse_diff(diff_file.read_text())
     discovery = json.loads(discovery_file.read_text())
     hunks_data = json.loads(hunks_file.read_text()) if hunks_file else None
@@ -1871,7 +1949,8 @@ def check_sizes(
 
     assignments, absorbed_into = _get_assignments(discovery, hunks_data)
     planner = SplitPlanner(
-        parsed, dag, size_threshold=threshold, absorbed_into=absorbed_into
+        parsed, dag, size_threshold=threshold, absorbed_into=absorbed_into,
+        delete_weight=delete_weight,
     )
     planner.assign_hunks(assignments)
     oversized = planner.get_oversized_topics()
@@ -1882,9 +1961,13 @@ def check_sizes(
 
     for tid in oversized:
         size = planner.get_topic_size(tid)
+        removed = planner.get_topic_removed_lines(tid)
         hunks = planner.get_topic_hunks(tid)
         files = len({h.file_path for h in hunks})
-        typer.echo(f"{tid}: {size} lines, {len(hunks)} hunks, {files} files")
+        removed_note = f", -{removed} deleted" if removed else ""
+        typer.echo(
+            f"{tid}: {size} lines{removed_note}, {len(hunks)} hunks, {files} files"
+        )
 
 
 @app.command(name="validate-discovery")

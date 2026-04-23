@@ -62,12 +62,12 @@ Split a large PR or branch diff into a chain of smaller, reviewable PRs.
 | `split-topic <hunks> <discovery> <topic> --into "new_id:path:p1,p2" --dep "a:b"` | Split one topic into sub-topics by path or scope; transfers external edges |
 | `show-hunks <hunks> [ids] --file X --preview N` | Inspect hunks by ID or file path, with content preview |
 | `show-plan <plan> -v --branch X` | Plan summary with dependencies, files per branch. **Branches are in merge order.** |
-| `build-plan <diff> <discovery> <base> <threshold> --hunks <hunks>` | Generate split plan from discovery |
+| `build-plan <diff> <discovery> <base> <threshold> --hunks <hunks> [--delete-weight W]` | Generate split plan. Review size = added + removed*W (default W=0, additions only) |
 | `build-patches <diff> <plan> -o <dir>` | Write patch files for each branch |
 | `create-branches <diff> <plan> <repo> --author X --prefix X` | Create all branches, apply patches, commit (one command) |
 | `push-branches <plan> <repo>` | Push all split branches to remote (one command) |
 | `create-prs <plan> <discovery> <owner/repo> [--name X] [--original-pr N] [--tracking-issue N]` | Create all PRs with DAG diagrams (one command) |
-| `check-sizes <diff> <discovery> <threshold> --hunks <hunks>` | Report oversized topics (pass --hunks for analyzed diffs) |
+| `check-sizes <diff> <discovery> <threshold> --hunks <hunks> [--delete-weight W]` | Report oversized topics (pass --hunks for analyzed diffs) |
 | `validate-discovery <hunks> <discovery>` | Check assignments, cycles, topic stats |
 | `verify <diff> <plan>` | Verify split is lossless before execution |
 | `verify-chain <plan> <repo> <base>` | Merge all branches in sequence, report conflicts (one command) |

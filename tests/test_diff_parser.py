@@ -2,7 +2,14 @@
 
 import json
 
-from split_pr.diff_parser import Hunk, FileDiff, ParsedDiff, parse_diff, build_patch
+from split_pr.diff_parser import (
+    FileDiff,
+    Hunk,
+    ParsedDiff,
+    build_patch,
+    parse_diff,
+    weighted_size,
+)
 
 
 # -- Fixtures: realistic diff text snippets --
@@ -185,14 +192,15 @@ class TestParseMultiFile:
 
     def test_total_size(self):
         result = parse_diff(MULTI_FILE_DIFF)
-        # models.py: +2 = 2, api.py hunk1: +1 = 1, api.py hunk2: +1 -1 = 2
-        assert result.total_size == 5
+        # Hunk.size counts only added lines (default delete_weight=0):
+        # models.py +2, api.py hunk1 +1, api.py hunk2 +1 = 4.
+        assert result.total_size == 4
 
     def test_per_file_sizes(self):
         result = parse_diff(MULTI_FILE_DIFF)
         sizes = {f.path: f.total_size for f in result.files}
         assert sizes["src/models.py"] == 2
-        assert sizes["src/api.py"] == 3
+        assert sizes["src/api.py"] == 2  # +1 + +1 (removals don't count)
 
 
 class TestParseMultiHunk:
@@ -253,7 +261,8 @@ class TestFileDiff:
                    added_lines=2, removed_lines=0)
         fd = FileDiff(path="f.py", is_new=False, is_deleted=False,
                       is_rename=False, old_path=None, hunks=[h1, h2])
-        assert fd.total_size == 6  # (3+1) + (2+0)
+        # Hunk.size counts added only (default delete_weight=0).
+        assert fd.total_size == 5  # 3 + 2
         assert fd.added_lines == 5
         assert fd.removed_lines == 1
 
@@ -435,6 +444,34 @@ class TestBinaryFiles:
         patch = build_patch(parsed, all_ids)
         assert "sample.parquet" not in patch
         assert "src/models.py" in patch
+
+
+class TestWeightedSize:
+    """weighted_size defaults to additions only; opt into deletes via weight."""
+
+    def test_default_weight_is_zero(self):
+        assert weighted_size(10, 5) == 10
+
+    def test_custom_weight(self):
+        assert weighted_size(10, 8, delete_weight=0.25) == 12
+
+    def test_weight_one_is_old_behavior(self):
+        assert weighted_size(10, 5, delete_weight=1.0) == 15
+
+    def test_pure_delete_with_zero_weight_is_zero(self):
+        assert weighted_size(0, 500) == 0
+
+    def test_pure_delete_with_weight_counts(self):
+        assert weighted_size(0, 500, delete_weight=0.25) == 125
+
+    def test_hunk_size_ignores_removed_by_default(self):
+        h = Hunk(
+            id="x", file_path="f.py", source_start=1, source_length=5,
+            target_start=1, target_length=2, content="...",
+            added_lines=2, removed_lines=500,
+        )
+        # size = added_lines only (default delete_weight=0).
+        assert h.size == 2
 
 
 class TestCollectBinaryOps:
