@@ -400,3 +400,106 @@ class TestRenderDagFullNoAbsorption:
         # No absorbed nodes → no classDef line emitted.
         assert ":::absorbed" not in result.output
         assert "classDef absorbed" not in result.output
+
+
+class TestRenderDagReduce:
+    """render-dag and render-dag-full transitively reduce edges by default."""
+
+    def _discovery_with_redundant_edge(self, tmp_path: Path) -> Path:
+        # a -> b -> c plus the redundant a -> c.
+        discovery = {
+            "dag": {
+                "topics": {
+                    "a": {"id": "a", "name": "A", "estimated_size": 10, "hunk_ids": []},
+                    "b": {"id": "b", "name": "B", "estimated_size": 10, "hunk_ids": []},
+                    "c": {"id": "c", "name": "C", "estimated_size": 10, "hunk_ids": []},
+                },
+                "edges": [
+                    {"from": "a", "to": "b"},
+                    {"from": "b", "to": "c"},
+                    {"from": "a", "to": "c"},
+                ],
+            }
+        }
+        p = tmp_path / "discovery.json"
+        p.write_text(json.dumps(discovery))
+        return p
+
+    def test_render_dag_reduces_by_default(self, tmp_path: Path):
+        path = self._discovery_with_redundant_edge(tmp_path)
+        result = runner.invoke(app, ["render-dag", str(path)])
+        assert result.exit_code == 0, result.output
+        assert "a --> b" in result.output
+        assert "b --> c" in result.output
+        # The transitive a -> c edge is dropped.
+        assert "a --> c" not in result.output
+
+    def test_render_dag_no_reduce_keeps_all_edges(self, tmp_path: Path):
+        path = self._discovery_with_redundant_edge(tmp_path)
+        result = runner.invoke(app, ["render-dag", str(path), "--no-reduce"])
+        assert result.exit_code == 0, result.output
+        assert "a --> b" in result.output
+        assert "b --> c" in result.output
+        assert "a --> c" in result.output
+
+    def test_render_dag_full_reduces_by_default(self, tmp_path: Path):
+        path = self._discovery_with_redundant_edge(tmp_path)
+        plan = {
+            "original_base": "main",
+            "branch_count": 3,
+            "branches": [
+                {"topic_id": "a", "branch_name": "split/a", "base_branch": "main", "estimated_size": 10},
+                {"topic_id": "b", "branch_name": "split/b", "base_branch": "split/a", "estimated_size": 10},
+                {"topic_id": "c", "branch_name": "split/c", "base_branch": "split/b", "estimated_size": 10},
+            ],
+            "absorbed_into": {},
+        }
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(plan))
+        result = runner.invoke(app, ["render-dag-full", str(path), str(plan_path)])
+        assert result.exit_code == 0, result.output
+        assert "a --> b" in result.output
+        assert "b --> c" in result.output
+        assert "a --> c" not in result.output
+
+
+class TestRenderDagSizeWarning:
+    """render-dag warns to stderr if the rendered block exceeds GitHub's limit."""
+
+    def test_warns_when_block_over_limit(self, tmp_path: Path):
+        # Build a discovery whose rendered Mermaid block is forced over 50_000
+        # chars by inflating one topic's name. One topic, no edges.
+        discovery = {
+            "dag": {
+                "topics": {
+                    "huge": {
+                        "id": "huge",
+                        "name": "X" * 60_000,
+                        "estimated_size": 1,
+                        "hunk_ids": [],
+                    }
+                },
+                "edges": [],
+            }
+        }
+        path = tmp_path / "discovery.json"
+        path.write_text(json.dumps(discovery))
+        result = runner.invoke(app, ["render-dag", str(path)])
+        assert result.exit_code == 0, result.output
+        # Typer CliRunner merges stderr into output by default; mix is fine.
+        assert "Maximum text size" in result.output or "over GitHub" in result.output
+
+    def test_no_warning_for_small_block(self, tmp_path: Path):
+        discovery = {
+            "dag": {
+                "topics": {
+                    "small": {"id": "small", "name": "S", "estimated_size": 1, "hunk_ids": []}
+                },
+                "edges": [],
+            }
+        }
+        path = tmp_path / "discovery.json"
+        path.write_text(json.dumps(discovery))
+        result = runner.invoke(app, ["render-dag", str(path)])
+        assert result.exit_code == 0
+        assert "WARNING" not in result.output

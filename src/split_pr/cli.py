@@ -2183,17 +2183,54 @@ def verify(
         raise typer.Exit(1)
 
 
+_GITHUB_MERMAID_LIMIT = 50_000
+"""GitHub renders Mermaid blocks larger than ~50KB as 'Maximum text size in
+diagram exceeded'. Keep output strictly under this; warn callers when close."""
+
+
+def _mermaid_edges(dag_data: dict, reduce: bool) -> list[tuple[str, str]]:
+    """Edges to render: optionally transitively reduced.
+
+    Falls back to raw edges if the DAG can't be loaded into TopicDAG (e.g.,
+    a malformed test fixture); rendering shouldn't crash on a render-only
+    code path.
+    """
+    raw = [(e["from"], e["to"]) for e in dag_data.get("edges", [])]
+    if not reduce:
+        return raw
+    try:
+        return TopicDAG.from_dict(dag_data).reduced_edges()
+    except Exception:
+        return raw
+
+
+def _check_mermaid_size(rendered: str) -> None:
+    """Warn to stderr if the rendered Mermaid block is over GitHub's limit."""
+    size = len(rendered)
+    if size > _GITHUB_MERMAID_LIMIT:
+        typer.echo(
+            f"WARNING: Mermaid block is {size} chars, over GitHub's "
+            f"{_GITHUB_MERMAID_LIMIT}-char limit. The diagram will render as "
+            f"'Maximum text size in diagram exceeded'. "
+            f"Reduce topic count, drop --no-reduce, or post the DAG out-of-band.",
+            err=True,
+        )
+
+
 @app.command(name="render-dag")
 def render_dag(
     discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
     highlight: str = typer.Option(None, "--highlight", "-h", help="Topic ID to highlight (for per-PR views)"),
     links_file: Path = typer.Option(None, "--links", "-l", help="JSON file mapping topic IDs to PR URLs"),
+    reduce: bool = typer.Option(True, "--reduce/--no-reduce", help="Drop transitively-redundant edges (default on; required for large DAGs to fit GitHub's Mermaid limit)"),
 ) -> None:
     """Render the topic DAG as a Mermaid diagram.
 
     Outputs a Mermaid graph definition that GitHub renders natively
     in markdown. Use --highlight to mark a specific topic. Use --links
-    to make nodes clickable (linking to their PRs).
+    to make nodes clickable (linking to their PRs). Edges are
+    transitively reduced by default — pass --no-reduce to keep every
+    declared edge (only useful for debugging the raw discovery output).
     """
     discovery = json.loads(discovery_file.read_text())
     links: dict[str, str] = json.loads(links_file.read_text()) if links_file else {}
@@ -2204,7 +2241,7 @@ def render_dag(
 
     dag_data = discovery["dag"]
     topics = dag_data["topics"]
-    edges = dag_data.get("edges", [])
+    edges = _mermaid_edges(dag_data, reduce=reduce)
 
     lines = ["```mermaid", "graph LR"]
 
@@ -2220,8 +2257,8 @@ def render_dag(
             lines.append(f'    {mid}["{label}"]')
 
     # Edges
-    for e in edges:
-        lines.append(f"    {_mermaid_id(e['from'])} --> {_mermaid_id(e['to'])}")
+    for src, dst in edges:
+        lines.append(f"    {_mermaid_id(src)} --> {_mermaid_id(dst)}")
 
     # Click links to PRs
     if links:
@@ -2236,7 +2273,9 @@ def render_dag(
 
     lines.append("```")
 
-    typer.echo("\n".join(lines))
+    rendered = "\n".join(lines)
+    _check_mermaid_size(rendered)
+    typer.echo(rendered)
 
 
 @app.command(name="render-dag-full")
@@ -2244,6 +2283,7 @@ def render_dag_full(
     discovery_file: Path = typer.Argument(..., help="Path to discovery JSON"),
     plan_file: Path = typer.Argument(None, help="Path to plan JSON (adds PR numbers/branch info)"),
     links_file: Path = typer.Option(None, "--links", "-l", help="JSON file mapping topic IDs to PR URLs"),
+    reduce: bool = typer.Option(True, "--reduce/--no-reduce", help="Drop transitively-redundant edges (default on; required for large DAGs to fit GitHub's Mermaid limit)"),
 ) -> None:
     """Render the full DAG for the tracking issue.
 
@@ -2260,7 +2300,7 @@ def render_dag_full(
 
     dag_data = discovery["dag"]
     topics = dag_data["topics"]
-    edges = dag_data.get("edges", [])
+    edges = _mermaid_edges(dag_data, reduce=reduce)
 
     # Build topic-to-branch mapping from plan
     topic_info: dict[str, dict] = {}
@@ -2312,8 +2352,8 @@ def render_dag_full(
             lines.append(f'    {mid}["{label}"]')
 
     # Edges
-    for e in edges:
-        lines.append(f"    {_mermaid_id(e['from'])} --> {_mermaid_id(e['to'])}")
+    for src, dst in edges:
+        lines.append(f"    {_mermaid_id(src)} --> {_mermaid_id(dst)}")
 
     # Find independent groups (nodes with no edges between them)
     # by checking weakly connected components
@@ -2353,7 +2393,9 @@ def render_dag_full(
 
     lines.append("```")
 
-    typer.echo("\n".join(lines))
+    rendered = "\n".join(lines)
+    _check_mermaid_size(rendered)
+    typer.echo(rendered)
 
 
 @app.command()

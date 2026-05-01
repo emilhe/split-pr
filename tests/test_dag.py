@@ -174,6 +174,36 @@ class TestSorting:
         assert dag.topological_sort() == ["alone"]
 
 
+class TestReducedEdges:
+    """transitive_reduction-based rendering helper."""
+
+    def test_drops_redundant_edge_via_path(self):
+        # a -> b -> c; the direct edge a -> c is redundant.
+        dag = TopicDAG()
+        for name in ["a", "b", "c"]:
+            dag.add_topic(make_topic(name))
+        dag.add_dependency("a", "b")
+        dag.add_dependency("b", "c")
+        dag.add_dependency("a", "c")
+        edges = set(dag.reduced_edges())
+        assert edges == {("a", "b"), ("b", "c")}
+
+    def test_keeps_unique_edges(self):
+        # Diamond: a -> b -> d, a -> c -> d. Both branch edges are needed.
+        dag = TopicDAG()
+        for name in ["a", "b", "c", "d"]:
+            dag.add_topic(make_topic(name))
+        dag.add_dependency("a", "b")
+        dag.add_dependency("a", "c")
+        dag.add_dependency("b", "d")
+        dag.add_dependency("c", "d")
+        edges = set(dag.reduced_edges())
+        assert edges == {("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")}
+
+    def test_empty_dag_returns_empty(self):
+        assert TopicDAG().reduced_edges() == []
+
+
 class TestGroups:
     def test_independent_groups(self):
         dag = TopicDAG()

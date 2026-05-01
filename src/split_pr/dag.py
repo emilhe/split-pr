@@ -124,6 +124,19 @@ class TopicDAG:
             raise KeyError(f"Topic '{topic_id}' not found")
         return nx.ancestors(self._graph, topic_id)
 
+    def reduced_edges(self) -> list[tuple[str, str]]:
+        """Edges with transitively-redundant ones removed.
+
+        For rendering: drops any edge u->v where v is already reachable
+        from u via another path. Halves edge count on densely-connected
+        DAGs and is required for diagrams that need to fit under
+        GitHub's ~50KB Mermaid block limit.
+        """
+        if self._graph.number_of_nodes() == 0:
+            return []
+        reduced = nx.transitive_reduction(self._graph)
+        return list(reduced.edges())
+
     def topological_sort(self) -> list[str]:
         """Return topics in dependency order (dependencies first).
 
