@@ -113,10 +113,13 @@ If `--pr <number>` was given:
 gh pr diff <number> > $RUN/diff.txt
 ```
 
-Otherwise, diff the current branch against base:
+Otherwise, diff the current branch against base. **Always fetch first and use `origin/<base>`** — diffing against a stale local branch silently produces wrong-shaped patches (the merge-base ends up behind real upstream, and work that's already on upstream gets re-emitted as if it were novel; split branches end up parented behind real upstream and conflict on merge):
 ```bash
-git diff <base>...HEAD > $RUN/diff.txt
+git fetch origin <base>
+git diff origin/<base>...HEAD > $RUN/diff.txt
 ```
+
+Use the same `origin/<base>` reference for every later command that takes `<base>` (`build-plan`, `verify-chain`, branch creation, PR base). Do NOT fall back to bare `<base>` — the local branch may be days behind.
 
 If the diff is empty, tell the user and stop.
 
@@ -176,6 +179,13 @@ The agent reads `$RUN/hunks.json` and writes `$RUN/discovery.json`.
 
 ### Phase 4: Review (unless --auto)
 
+> **`--auto` is a CLI flag the user types on the `/split-pr` command line.** Harness-level
+> auto modes ("Auto Mode", "auto-accept", auto-approval settings) do NOT imply `--auto`.
+> If you didn't see `--auto` in the user's `/split-pr` invocation, this phase is mandatory:
+> present the results and wait for an explicit text approval before continuing. Creating
+> 50–100 public PRs is a high-blast-radius action that needs confirmation regardless of
+> harness auto-settings.
+
 Read the discovery output:
 
 ```bash
@@ -190,6 +200,12 @@ Present to the user:
 2. **Dependency graph** (which topics depend on which)
 3. **Independent groups** (topics that can be reviewed in parallel)
 4. **Any oversized topics** that will need further decomposition
+5. **Divergence from any user-stated target** — if the user mentioned a target topic count,
+   referenced a prior split, or said "similar to" something, explicitly compute and surface
+   the delta (new count vs target, mapping of new topics → old topics). If divergence
+   exceeds ~15% in count or restructures topic boundaries, treat this as a forced stop:
+   do NOT proceed without an explicit "go" from the user, even if `--auto` was passed.
+   Mention this can be tightened with `merge-topics` or loosened with `split-topic`.
 
 Ask the user if they want to:
 - Approve and proceed
@@ -245,6 +261,11 @@ Generate the full DAG for the tracking issue:
 ```bash
 split-pr-tools render-dag-full $RUN/discovery.json $RUN/plan.json
 ```
+
+`render-dag` and `render-dag-full` transitively reduce edges by default and warn on stderr
+if the rendered Mermaid block exceeds GitHub's ~50KB limit (above which the diagram renders
+as "Maximum text size in diagram exceeded"). If you see that warning, stop and either reduce
+topic count via `merge-topics` or post the DAG out-of-band rather than embedding it.
 
 Then create the **tracking issue** with the DAG included:
 
