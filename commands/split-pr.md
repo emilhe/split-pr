@@ -62,7 +62,7 @@ Split a large PR or branch diff into a chain of smaller, reviewable PRs.
 | `split-topic <hunks> <discovery> <topic> --into "new_id:path:p1,p2" --dep "a:b"` | Split one topic into sub-topics by path or scope; transfers external edges |
 | `show-hunks <hunks> [ids] --file X --preview N` | Inspect hunks by ID or file path, with content preview |
 | `show-plan <plan> -v --branch X` | Plan summary with dependencies, files per branch. **Branches are in merge order.** |
-| `build-plan <diff> <discovery> <base> <threshold> --hunks <hunks> [--delete-weight W]` | Generate split plan. Review size = added + removed*W (default W=0, additions only) |
+| `build-plan <diff> <discovery> <base> <threshold> --hunks <hunks> [--delete-weight W] [--use-discovery-slugs]` | Generate split plan. Review size = added + removed*W (default W=0). `--use-discovery-slugs` honors each topic's `metadata.branch_slug` (for aligned re-splits). |
 | `build-patches <diff> <plan> -o <dir>` | Write patch files for each branch |
 | `create-branches <diff> <plan> <repo> --author X --prefix X` | Create all branches, apply patches, commit (one command) |
 | `push-branches <plan> <repo>` | Push all split branches to remote (one command) |
@@ -206,6 +206,13 @@ Present to the user:
    exceeds ~15% in count or restructures topic boundaries, treat this as a forced stop:
    do NOT proceed without an explicit "go" from the user, even if `--auto` was passed.
    Mention this can be tightened with `merge-topics` or loosened with `split-topic`.
+
+**Aligned re-splits** — if the user wants the new split to mirror a prior split (same topic
+groupings, same branch slugs for traceability with already-reviewed PRs), brief the
+discovery agent with the prior topic list as a target and have it write
+`metadata.branch_slug` and `metadata.old_pr_number` on each topic. Then pass
+`--use-discovery-slugs` to `build-plan` so the resulting branches reuse the prior slugs and
+chained `base_branch` references stay consistent.
 
 Ask the user if they want to:
 - Approve and proceed

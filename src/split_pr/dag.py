@@ -34,6 +34,11 @@ class Topic:
     estimated_size: int = 0
     hunk_ids: list[str] = field(default_factory=list)
     is_shared: bool = False  # True if this is shared infrastructure
+    metadata: dict = field(default_factory=dict)
+    """Free-form discovery-time metadata. Currently honored keys:
+    - ``branch_slug``: forces the SplitPlanner's branch name when the
+      planner is built with ``use_metadata_slugs=True`` (e.g. for
+      aligned re-splits that mirror an earlier split's branch names)."""
 
     @property
     def hunk_count(self) -> int:
@@ -291,6 +296,7 @@ class TopicDAG:
                     "estimated_size": t.estimated_size,
                     "hunk_ids": t.hunk_ids,
                     "is_shared": t.is_shared,
+                    "metadata": dict(t.metadata),
                 }
                 for tid, t in self._topics.items()
             },
@@ -315,6 +321,7 @@ class TopicDAG:
                 estimated_size=tdata.get("estimated_size", 0),
                 hunk_ids=tdata.get("hunk_ids", []),
                 is_shared=tdata.get("is_shared", False),
+                metadata=dict(tdata.get("metadata") or {}),
             ))
         for edge in data["edges"]:
             dag.add_dependency(edge["from"], edge["to"])

@@ -372,6 +372,18 @@ class TestSerialization:
         assert restored.topics["a"].hunk_ids == ["h1", "h2"]
         assert restored.get_dependencies("b") == ["a"]
 
+    def test_metadata_roundtrips(self):
+        dag = TopicDAG()
+        dag.add_topic(Topic(
+            id="a", name="Alpha",
+            metadata={"branch_slug": "alpha-old-slug", "old_pr_number": 42},
+        ))
+        restored = TopicDAG.from_dict(dag.to_dict())
+        assert restored.topics["a"].metadata == {
+            "branch_slug": "alpha-old-slug",
+            "old_pr_number": 42,
+        }
+
     def test_to_json_valid(self):
         dag = TopicDAG()
         dag.add_topic(make_topic("x"))

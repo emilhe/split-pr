@@ -1395,6 +1395,10 @@ def build_plan(
         0.0, "--delete-weight",
         help="Weight for removed lines in review-size metric (default 0 = additions only).",
     ),
+    use_discovery_slugs: bool = typer.Option(
+        False, "--use-discovery-slugs",
+        help="Use each topic's metadata.branch_slug as the branch name (for aligned re-splits that mirror a prior split's slugs).",
+    ),
 ) -> None:
     """Build a split plan from a diff and discovery output.
 
@@ -1404,6 +1408,11 @@ def build_plan(
     observation that deleting code is much cheaper to review than
     adding it. The full removed-line count is still recorded on each
     branch for informational display.
+
+    With ``--use-discovery-slugs``, branches whose topic carries a
+    ``metadata.branch_slug`` use that exact slug instead of one
+    derived from the topic name. ``base_branch`` references between
+    chained branches are kept consistent automatically.
     """
     parsed = parse_diff(diff_file.read_text())
     discovery = json.loads(discovery_file.read_text())
@@ -1418,6 +1427,7 @@ def build_plan(
         size_threshold=threshold,
         absorbed_into=absorbed_into,
         delete_weight=delete_weight,
+        use_metadata_slugs=use_discovery_slugs,
     )
     planner.assign_hunks(assignments)
     plan = planner.build_plan()

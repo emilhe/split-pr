@@ -208,6 +208,43 @@ class TestBuildPlan:
         for branch in plan.branches:
             assert branch.branch_name.startswith("pr-split/")
 
+    def test_metadata_slug_overrides_branch_name(self):
+        """With use_metadata_slugs, branch_slug from topic.metadata wins."""
+        parsed, dag, assignments = _build_test_setup()
+        # Pin slugs that match an old split's branch names
+        dag.topics["shared"].metadata = {"branch_slug": "shared-utils-v1"}
+        dag.topics["cats"].metadata = {"branch_slug": "cat-models-v1"}
+        # Leave dogs without an override — it should fall back to derived
+        planner = SplitPlanner(parsed, dag, use_metadata_slugs=True)
+        planner.assign_hunks(assignments)
+        plan = planner.build_plan()
+        assert plan.get_branch("shared").branch_name == "split/shared-utils-v1"
+        assert plan.get_branch("cats").branch_name == "split/cat-models-v1"
+        # Override-less topic still gets the derived name
+        assert plan.get_branch("dogs").branch_name == "split/dog-models-and-api"
+
+    def test_metadata_slug_used_for_chained_base_branch(self):
+        """Chained branches should reference the override-aware base."""
+        parsed, dag, assignments = _build_test_setup()
+        dag.topics["shared"].metadata = {"branch_slug": "shared-utils-v1"}
+        planner = SplitPlanner(parsed, dag, use_metadata_slugs=True)
+        planner.assign_hunks(assignments)
+        plan = planner.build_plan()
+        # cats and dogs both depend on shared — their base_branch should
+        # use the overridden slug, not the derived one
+        assert plan.get_branch("cats").base_branch == "split/shared-utils-v1"
+        assert plan.get_branch("dogs").base_branch == "split/shared-utils-v1"
+
+    def test_metadata_slug_ignored_without_flag(self):
+        """Default behavior unchanged — metadata is inert without the flag."""
+        parsed, dag, assignments = _build_test_setup()
+        dag.topics["shared"].metadata = {"branch_slug": "shared-utils-v1"}
+        planner = SplitPlanner(parsed, dag)  # no use_metadata_slugs
+        planner.assign_hunks(assignments)
+        plan = planner.build_plan()
+        # Falls back to derived name despite the metadata
+        assert plan.get_branch("shared").branch_name == "split/shared-utilities"
+
     def test_custom_base_branch(self):
         parsed, dag, assignments = _build_test_setup()
         planner = SplitPlanner(parsed, dag, base_branch="develop")

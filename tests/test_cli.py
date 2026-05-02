@@ -402,6 +402,87 @@ class TestRenderDagFullNoAbsorption:
         assert "classDef absorbed" not in result.output
 
 
+class TestBuildPlanDiscoverySlugs:
+    """`build-plan --use-discovery-slugs` honors metadata.branch_slug."""
+
+    _DIFF = (
+        "diff --git a/a.py b/a.py\n"
+        "index 1..2 100644\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1 +1,2 @@\n"
+        " a\n"
+        "+new line\n"
+        "diff --git a/b.py b/b.py\n"
+        "index 3..4 100644\n"
+        "--- a/b.py\n"
+        "+++ b/b.py\n"
+        "@@ -1 +1,2 @@\n"
+        " b\n"
+        "+new line\n"
+    )
+
+    def _setup(self, tmp_path: Path) -> tuple[Path, Path]:
+        from split_pr.diff_parser import parse_diff
+
+        parsed = parse_diff(self._DIFF)
+        hunks = parsed.all_hunks
+        # Two topics, one hunk each, no edges.
+        a_id, b_id = hunks[0].id, hunks[1].id
+        diff_path = tmp_path / "diff.txt"
+        diff_path.write_text(self._DIFF)
+        discovery = {
+            "dag": {
+                "topics": {
+                    "topic-a": {
+                        "id": "topic-a",
+                        "name": "Friendly Topic Name A",
+                        "estimated_size": 1,
+                        "hunk_ids": [a_id],
+                        "metadata": {"branch_slug": "old-slug-a"},
+                    },
+                    "topic-b": {
+                        "id": "topic-b",
+                        "name": "Friendly Topic Name B",
+                        "estimated_size": 1,
+                        "hunk_ids": [b_id],
+                        # No metadata — falls back to derived
+                    },
+                },
+                "edges": [],
+            }
+        }
+        disc_path = tmp_path / "discovery.json"
+        disc_path.write_text(json.dumps(discovery))
+        return diff_path, disc_path
+
+    def test_flag_uses_metadata_slug(self, tmp_path: Path):
+        diff_path, disc_path = self._setup(tmp_path)
+        result = runner.invoke(
+            app,
+            ["build-plan", str(diff_path), str(disc_path), "main", "400",
+             "--use-discovery-slugs"],
+        )
+        assert result.exit_code == 0, result.output
+        plan = json.loads(result.output)
+        names = {b["topic_id"]: b["branch_name"] for b in plan["branches"]}
+        assert names["topic-a"] == "split/old-slug-a"
+        # topic-b has no override, so derived name applies
+        assert names["topic-b"] == "split/friendly-topic-name-b"
+
+    def test_default_ignores_metadata_slug(self, tmp_path: Path):
+        diff_path, disc_path = self._setup(tmp_path)
+        result = runner.invoke(
+            app,
+            ["build-plan", str(diff_path), str(disc_path), "main", "400"],
+        )
+        assert result.exit_code == 0, result.output
+        plan = json.loads(result.output)
+        names = {b["topic_id"]: b["branch_name"] for b in plan["branches"]}
+        # Without the flag both topics get derived names, ignoring the metadata
+        assert names["topic-a"] == "split/friendly-topic-name-a"
+
+
 class TestRenderDagReduce:
     """render-dag and render-dag-full transitively reduce edges by default."""
 

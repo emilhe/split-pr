@@ -109,6 +109,7 @@ class SplitPlanner:
         branch_prefix: str = "split",
         absorbed_into: dict[str, str] | None = None,
         delete_weight: float = 0.0,
+        use_metadata_slugs: bool = False,
     ) -> None:
         self.parsed_diff = parsed_diff
         self.dag = dag
@@ -121,6 +122,7 @@ class SplitPlanner:
         self._assignments: dict[str, str] = {}  # hunk_id -> topic_id
         self._absorbed_into: dict[str, str] = dict(absorbed_into or {})
         self.delete_weight = delete_weight
+        self.use_metadata_slugs = use_metadata_slugs
 
     def _size(self, hunk: Hunk) -> int:
         return weighted_size(hunk.added_lines, hunk.removed_lines, self.delete_weight)
@@ -236,6 +238,12 @@ class SplitPlanner:
 
     def _branch_name(self, topic_id: str) -> str:
         topic = self.dag.topics[topic_id]
+        if self.use_metadata_slugs:
+            override = (topic.metadata or {}).get("branch_slug")
+            if override:
+                # Trust the override verbatim — it's an explicit user choice
+                # (e.g. mirroring a prior split's branch names).
+                return f"{self.branch_prefix}/{override}"
         slug = topic.name.lower().replace(" ", "-").replace("_", "-")
         # Keep it short and valid as a git branch name
         slug = "".join(c for c in slug if c.isalnum() or c == "-")
